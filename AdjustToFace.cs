@@ -177,7 +177,38 @@ namespace IvanTools
                 }
 
                 // -----------------------------------------------------------------
-                // 3. Выравнивание вершин в одной транзакции
+                // 3. Верх или низ элемента ложится на плоскость
+                // -----------------------------------------------------------------
+                // SlabShapeEditor правит ВЕРХНЮЮ поверхность, а низ идет за ней на
+                // толщину конструкции. Поэтому для «по нижней грани» все вершины
+                // поднимаются на толщину: низ ложится точно на плоскость.
+                double thickness = GetHostThickness(doc, hostElement);
+                double thicknessMm = UnitUtils.ConvertFromInternalUnits(thickness, UnitTypeId.Millimeters);
+                double verticalOffset = 0.0;
+                bool alongBottomFace = false;
+
+                if (thickness > 0.0)
+                {
+                    TaskDialog bottomDlg = new TaskDialog("IvanTools — AdjustToFace");
+                    bottomDlg.MainInstruction = "Выравнивать по нижней грани?";
+                    bottomDlg.MainContent = string.Format(
+                        "Толщина элемента: {0:F1} мм.\n\n" +
+                        "Да  — вершины поднимутся на толщину, на плоскость ляжет НИЗ элемента.\n" +
+                        "Нет — на плоскость ляжет ВЕРХ элемента (текущее поведение).",
+                        thicknessMm);
+                    bottomDlg.CommonButtons = TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No;
+
+                    if (bottomDlg.Show() == TaskDialogResult.Yes)
+                    {
+                        verticalOffset = thickness;
+                        alongBottomFace = true;
+                    }
+                }
+                // Если толщину определить не удалось (thickness <= 0) — не спрашиваем,
+                // выравниваем по верхней грани и сообщаем об этом в сводке.
+
+                // -----------------------------------------------------------------
+                // 4. Выравнивание вершин в одной транзакции
                 // -----------------------------------------------------------------
                 int adjusted = 0;
                 var errors = new List<string>();
@@ -205,7 +236,7 @@ namespace IvanTools
 
                         XYZ position = vertex.Position;
                         targets.Add(new VertexTarget(position,
-                            ElevationAt(origin, normal, position.X, position.Y)));
+                            ElevationAt(origin, normal, position.X, position.Y) + verticalOffset));
                     }
 
                     if (targets.Count == 0)
@@ -239,7 +270,7 @@ namespace IvanTools
                     if (adjusted == 0)
                     {
                         tx.RollBack();
-                        ShowSummary(0, targets.Count, needEnable, errors);
+                        ShowSummary(0, targets.Count, needEnable, alongBottomFace, thicknessMm, errors);
                         message = errors.Count > 0 ? errors[0] : "Ни одна вершина не была выровнена.";
                         return Result.Failed;
                     }
@@ -248,7 +279,7 @@ namespace IvanTools
                 }
 
                 uidoc.RefreshActiveView();
-                ShowSummary(adjusted, adjusted + errors.Count, needEnable, errors);
+                ShowSummary(adjusted, adjusted + errors.Count, needEnable, alongBottomFace, thicknessMm, errors);
                 return Result.Succeeded;
             }
             catch (RevitCanceledException)
@@ -408,11 +439,68 @@ namespace IvanTools
         }
 
         // ---------------------------------------------------------------------
+        // Толщина конструкции в футах.
+        // Порядок источников: инстанс-параметр -> CompoundStructure типа -> 0
+        // (0 = толщину определить не удалось, работаем по верхней грани)
+        // ---------------------------------------------------------------------
+        private static double GetHostThickness(Document doc, Element host)
+        {
+            if (doc == null || host == null)
+                return 0.0;
+
+            BuiltInParameter thicknessParam = (host is RoofBase)
+                ? BuiltInParameter.ROOF_ATTR_THICKNESS_PARAM
+                : BuiltInParameter.FLOOR_ATTR_THICKNESS_PARAM;
+
+            Parameter instanceParam = host.get_Parameter(thicknessParam);
+            if (instanceParam != null
+                && instanceParam.StorageType == StorageType.Double
+                && instanceParam.AsDouble() > 0.0)
+            {
+                return instanceParam.AsDouble();
+            }
+
+            HostObjAttributes hostType = doc.GetElement(host.GetTypeId()) as HostObjAttributes;
+            if (hostType != null)
+            {
+                CompoundStructure structure = hostType.GetCompoundStructure();
+                if (structure != null && structure.GetWidth() > 0.0)
+                    return structure.GetWidth();
+            }
+
+            return 0.0;
+        }
+
+        // ---------------------------------------------------------------------
         // Сводный диалог по результатам работы
         // ---------------------------------------------------------------------
-        private static void ShowSummary(int adjusted, int total, bool enabledNow, List<string> errors)
+        private static void ShowSummary(
+            int adjusted,
+            int total,
+            bool enabledNow,
+            bool alongBottomFace,
+            double thicknessMm,
+            List<string> errors)
         {
             string content = string.Format("Вершин выровнено: {0} из {1}", adjusted, total);
+
+            if (thicknessMm <= 0.0)
+            {
+                content += "\nСмещение: 0.0 мм — толщина конструкции не определена, " +
+                           "выравнивание по верхней грани.";
+            }
+            else if (alongBottomFace)
+            {
+                content += string.Format(
+                    "\nСмещение: +{0:F1} мм — по нижней грани (толщина конструкции {0:F1} мм).",
+                    thicknessMm);
+            }
+            else
+            {
+                content += string.Format(
+                    "\nСмещение: 0.0 мм — по верхней грани (толщина конструкции {0:F1} мм).",
+                    thicknessMm);
+            }
 
             if (enabledNow)
                 content += "\nРедактирование формы было включено автоматически.";
