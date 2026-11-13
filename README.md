@@ -39,4 +39,5 @@ C:\ProgramData\Autodesk\Revit\Addins\2023\
 * план текущей задачи — `PLAN.md`; завершённые планы — `<Плагин>_PLAN.md`;
 * один файл = один плагин, ровно один `public class : IExternalCommand` (требование `CsHotLoader`);
 * никаких NuGet-зависимостей: только `RevitAPI`, `RevitAPIUI` и сборки .NET Framework (`System.Windows.Forms`, `System.Drawing`);
+* настройки плагинов — текстовый `IvanTools.ini` рядом с `.rvt` (секции `[ifc]`, позже `[glb]`); синтаксис, поиск и правила ошибок — в `PLAN.md` §12;
 * `AddInId` — новый GUID на каждый плагин (проверять, что не занят).
