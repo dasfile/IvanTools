@@ -132,16 +132,24 @@ namespace IvanTools
 
         private static string BuildReport(string path, GlbScene scene, double seconds)
         {
+            long size = 0;
+            try { size = new FileInfo(path).Length; }
+            catch { size = 0; }
+
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("Файл: " + path);
+            sb.AppendLine("Размер: " + (size / 1024.0 / 1024.0).ToString("0.00", CultureInfo.InvariantCulture) +
+                " МБ (" + size.ToString() + " Б)");
             sb.AppendLine("Время: " + seconds.ToString("0.0", CultureInfo.InvariantCulture) + " с");
             sb.AppendLine();
-            sb.AppendLine("Элементов: " + scene.ElementCount.ToString());
+            sb.AppendLine("Элементов: " + scene.ElementCount.ToString() +
+                " (без геометрии: " + scene.ElementsWithoutGeometry.ToString() + ")");
             sb.AppendLine("Мешей: " + scene.Meshes.Count.ToString());
             sb.AppendLine("Примитивов: " + scene.PrimitiveCount.ToString());
             sb.AppendLine("Треугольников: " + scene.TriangleCount.ToString());
             sb.AppendLine("Материалов: " + scene.Materials.Count.ToString());
-            sb.AppendLine("Текстур: " + scene.Images.Count.ToString());
+            sb.AppendLine("Текстур встроено: " + scene.Images.Count.ToString() +
+                " (не найдено: " + scene.TexturesMissing.ToString() + ")");
 
             if (scene.Warnings.Count > 0)
             {
@@ -311,7 +319,10 @@ namespace IvanTools
 
                 // Пустой меш (элемент целиком за Section Box / без граней) не пишем
                 if (!state.Mesh.HasGeometry())
+                {
+                    _scene.ElementsWithoutGeometry++;
                     return;
+                }
 
                 int meshIndex = _scene.AddMesh(state.Mesh);
                 GlbNode node = new GlbNode(state.Mesh.Name);
@@ -501,7 +512,7 @@ namespace IvanTools
             // Этап 0: замер диапазона UV (см. PLAN.md §8)
             if (_uvProbeCount < UvProbe.MaxPolymeshes)
             {
-                UvProbe.Log(state.Mesh.Name, node, xf);
+                UvProbe.Log(state.Mesh.Name, node, xf, material);
                 _uvProbeCount++;
             }
 
@@ -521,11 +532,11 @@ namespace IvanTools
                 if (cross.DotProduct(cross) <= 1e-12)
                     continue;
 
-                int v0 = GetVertexIndex(prim, vertexMap, baseIndex, node, xf, normalsMode,
+                int v0 = GetVertexIndex(prim, material, vertexMap, baseIndex, node, xf, normalsMode,
                     normalCount, uvCount, pointCount, i0, f);
-                int v1 = GetVertexIndex(prim, vertexMap, baseIndex, node, xf, normalsMode,
+                int v1 = GetVertexIndex(prim, material, vertexMap, baseIndex, node, xf, normalsMode,
                     normalCount, uvCount, pointCount, i1, f);
-                int v2 = GetVertexIndex(prim, vertexMap, baseIndex, node, xf, normalsMode,
+                int v2 = GetVertexIndex(prim, material, vertexMap, baseIndex, node, xf, normalsMode,
                     normalCount, uvCount, pointCount, i2, f);
 
                 prim.Indices.Add(v0);
@@ -537,6 +548,7 @@ namespace IvanTools
         // Одна вершина примитива на уникальную комбинацию (точка, нормаль, UV)
         private static int GetVertexIndex(
             GlbPrimitive prim,
+            GlbMaterial material,
             Dictionary<long, int> vertexMap,
             int baseIndex,
             PolymeshTopology node,
@@ -603,9 +615,10 @@ namespace IvanTools
             if (prim.HasUv)
             {
                 UV uv = node.GetUV(uvIndex);
-                prim.Uvs.Add((float)uv.U);
-                // glTF: origin текстуры сверху => инверсия V (при тайлинге 1-V неверно)
-                prim.Uvs.Add((float)(-uv.V));
+                // Revit отдаёт UV в футах: делим на реальный размер тайла (RealWorldScale),
+                // учитываем повтор; V инвертируем (origin текстуры в glTF сверху).
+                prim.Uvs.Add((float)(uv.U * material.UvMulU));
+                prim.Uvs.Add((float)(-uv.V * material.UvMulV));
             }
 
             int index = baseIndex + vertexMap.Count;
@@ -654,11 +667,23 @@ namespace IvanTools
             "unifiedbitmap_Bitmap", "unifiedbitmap_bitmap", "bitmap"
         };
 
+        // Цвет Revit — sRGB, а glTF baseColorFactor задаётся в линейном пространстве.
+        // Без конвертации модель выглядит светлее и «вымыто» (нежнее/голубее).
+        private const bool ConvertSrgbToLinear = true;
+
+        // Ключи масштаба/повтора текстуры в ассете UnifiedBitmap
+        private const string KeyScaleU = "texture_RealWorldScaleX";
+        private const string KeyScaleV = "texture_RealWorldScaleY";
+        private const string KeyRepeatU = "texture_URepeat";
+        private const string KeyRepeatV = "texture_VRepeat";
+
         private readonly GlbScene _scene;
         private readonly Dictionary<string, GlbMaterial> _cache = new Dictionary<string, GlbMaterial>();
         private readonly Dictionary<string, int> _imageCache = new Dictionary<string, int>();
+        private readonly Dictionary<string, string> _pathCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, bool> _missing = new Dictionary<string, bool>();
         private readonly GlbMaterial _defaultMaterial;
+        private Dictionary<string, string> _textureIndexByName;
         private static string _texturesRoot;
 
         public MaterialLibrary(GlbScene scene)
@@ -666,9 +691,9 @@ namespace IvanTools
             _scene = scene;
             _defaultMaterial = new GlbMaterial();
             _defaultMaterial.Name = "Default";
-            _defaultMaterial.R = 0.72f;
-            _defaultMaterial.G = 0.72f;
-            _defaultMaterial.B = 0.72f;
+            _defaultMaterial.R = SrgbToLinear(0.72f);
+            _defaultMaterial.G = SrgbToLinear(0.72f);
+            _defaultMaterial.B = SrgbToLinear(0.72f);
             _defaultMaterial.A = 1f;
             _defaultMaterial.Roughness = 0.6f;
             _defaultMaterial.Metallic = 0f;
@@ -724,15 +749,15 @@ namespace IvanTools
 
             if (color != null)
             {
-                m.R = color.Red / 255f;
-                m.G = color.Green / 255f;
-                m.B = color.Blue / 255f;
+                m.R = ConvertColor(color.Red / 255f);
+                m.G = ConvertColor(color.Green / 255f);
+                m.B = ConvertColor(color.Blue / 255f);
             }
             else
             {
-                m.R = 0.72f;
-                m.G = 0.72f;
-                m.B = 0.72f;
+                m.R = SrgbToLinear(0.72f);
+                m.G = SrgbToLinear(0.72f);
+                m.B = SrgbToLinear(0.72f);
             }
 
             string title = null;
@@ -783,18 +808,7 @@ namespace IvanTools
                 // Текстура base color: текстура перекрывает цвет, фактор = белый
                 try
                 {
-                    string texturePath = FindTexturePath(asset);
-                    if (!string.IsNullOrEmpty(texturePath))
-                    {
-                        int imageIndex = GetImageIndex(texturePath);
-                        if (imageIndex >= 0)
-                        {
-                            m.ImageIndex = imageIndex;
-                            m.R = 1f;
-                            m.G = 1f;
-                            m.B = 1f;
-                        }
-                    }
+                    TryApplyTexture(asset, m);
                 }
                 catch
                 {
@@ -814,12 +828,13 @@ namespace IvanTools
             return m;
         }
 
-        private static string FindTexturePath(Asset asset)
+        // Текстура + её реальный масштаб/повтор из подключённого ассета UnifiedBitmap
+        private void TryApplyTexture(Asset rootAsset, GlbMaterial m)
         {
             for (int i = 0; i < DiffuseKeys.Length; i++)
             {
                 AssetProperty prop = null;
-                try { prop = asset.FindByName(DiffuseKeys[i]); }
+                try { prop = rootAsset.FindByName(DiffuseKeys[i]); }
                 catch { prop = null; }
                 if (prop == null)
                     continue;
@@ -830,33 +845,132 @@ namespace IvanTools
                 if (connected == null)
                     continue;
 
-                string path = GetBitmapPath(connected);
-                if (!string.IsNullOrEmpty(path))
-                    return path;
-            }
+                List<string> candidates = GetBitmapPaths(connected);
+                if (candidates.Count == 0)
+                    continue;
 
-            return null;
+                int imageIndex = GetImageIndex(candidates);
+                if (imageIndex < 0)
+                    continue;
+
+                m.ImageIndex = imageIndex;
+                m.R = 1f;
+                m.G = 1f;
+                m.B = 1f;
+
+                // Revit отдаёт UV в футах, поэтому тайл = RealWorldScale (футы)
+                float scaleU = ReadDistance(connected, KeyScaleU, 1f);
+                float scaleV = ReadDistance(connected, KeyScaleV, 1f);
+                float repeatU = ReadNumber(connected, KeyRepeatU, 1f);
+                float repeatV = ReadNumber(connected, KeyRepeatV, 1f);
+                m.UvMulU = repeatU / scaleU;
+                m.UvMulV = repeatV / scaleV;
+                return;
+            }
         }
 
-        private static string GetBitmapPath(Asset asset)
+        // В AssetPropertyString Revit хранит несколько вариантов пути через '|'
+        private static List<string> GetBitmapPaths(Asset asset)
         {
+            List<string> result = new List<string>();
             for (int i = 0; i < BitmapKeys.Length; i++)
             {
                 AssetPropertyString text = null;
                 try { text = asset.FindByName(BitmapKeys[i]) as AssetPropertyString; }
                 catch { text = null; }
-                if (text != null && !string.IsNullOrEmpty(text.Value))
-                    return text.Value;
+                if (text == null || string.IsNullOrEmpty(text.Value))
+                    continue;
+
+                string[] parts = text.Value.Split('|');
+                for (int p = 0; p < parts.Length; p++)
+                {
+                    string candidate = NormalizePathCandidate(parts[p]);
+                    if (!string.IsNullOrEmpty(candidate) && !result.Contains(candidate))
+                        result.Add(candidate);
+                }
+            }
+            return result;
+        }
+
+        // Смешанные слеши ("Textures\/1/Mats/..."), двойные разделители, лишние пробелы
+        private static string NormalizePathCandidate(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return null;
+
+            string path = value.Trim().Replace('/', '\\');
+            while (path.IndexOf("\\\\", StringComparison.Ordinal) >= 0)
+                path = path.Replace("\\\\", "\\");
+            path = path.Replace("\\/", "\\").Replace("/\\", "\\");
+            path = path.Trim('\\');
+            return path.Length == 0 ? null : path;
+        }
+
+        private static float ReadDistance(Asset asset, string key, float fallback)
+        {
+            try
+            {
+                AssetPropertyDistance distance = asset.FindByName(key) as AssetPropertyDistance;
+                if (distance != null && distance.Value > 0)
+                    return (float)distance.Value;
+            }
+            catch
+            {
             }
 
-            return null;
+            return ReadNumber(asset, key, fallback);
         }
-        private int GetImageIndex(string rawPath)
+
+        private static float ReadNumber(Asset asset, string key, float fallback)
         {
-            string path = ResolveImagePath(rawPath);
+            try
+            {
+                AssetPropertyInteger integer = asset.FindByName(key) as AssetPropertyInteger;
+                if (integer != null && integer.Value > 0)
+                    return integer.Value;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                AssetPropertyDouble number = asset.FindByName(key) as AssetPropertyDouble;
+                if (number != null && number.Value > 0)
+                    return (float)number.Value;
+            }
+            catch
+            {
+            }
+
+            return fallback;
+        }
+
+        private static float ConvertColor(float sRGB)
+        {
+            return ConvertSrgbToLinear ? SrgbToLinear(sRGB) : sRGB;
+        }
+
+        private static float SrgbToLinear(float value)
+        {
+            if (value <= 0f) return 0f;
+            if (value >= 1f) return 1f;
+            return value <= 0.04045f
+                ? value / 12.92f
+                : (float)Math.Pow((value + 0.055) / 1.055, 2.4);
+        }
+        private int GetImageIndex(List<string> candidates)
+        {
+            if (candidates == null || candidates.Count == 0)
+                return -1;
+
+            string path = null;
+            for (int i = 0; i < candidates.Count && path == null; i++)
+                path = ResolveImagePath(candidates[i]);
+
             if (path == null)
             {
-                ReportMissingTexture(rawPath);
+                ReportMissingTexture(string.Join(" | ", candidates.ToArray()));
                 return -1;
             }
 
@@ -868,7 +982,7 @@ namespace IvanTools
             string mimeType;
             if (!TryLoadImage(path, out data, out mimeType))
             {
-                ReportMissingTexture(rawPath);
+                ReportMissingTexture(string.Join(" | ", candidates.ToArray()));
                 return -1;
             }
 
@@ -884,50 +998,99 @@ namespace IvanTools
 
         // Абсолютный путь принимается как есть, иначе ищется файл с тем же именем
         // в библиотеке текстур Autodesk (%ProgramFiles(x86)%\Common Files\Autodesk Shared\...)
-        private static string ResolveImagePath(string rawPath)
+        private string ResolveImagePath(string candidate)
         {
-            if (string.IsNullOrEmpty(rawPath))
+            if (string.IsNullOrEmpty(candidate))
+                return null;
+
+            string cached;
+            if (_pathCache.TryGetValue(candidate, out cached))
+                return cached.Length == 0 ? null : cached;
+
+            string resolved = ResolveImagePathCore(candidate);
+            _pathCache[candidate] = resolved == null ? string.Empty : resolved;
+            return resolved;
+        }
+
+        private string ResolveImagePathCore(string candidate)
+        {
+            string path = NormalizePathCandidate(candidate);
+            if (string.IsNullOrEmpty(path))
                 return null;
 
             try
             {
-                if (Path.IsPathRooted(rawPath) && File.Exists(rawPath))
-                    return rawPath;
+                if (Path.IsPathRooted(path) && File.Exists(path))
+                    return path;
             }
             catch
             {
             }
 
             string fileName = null;
-            try { fileName = Path.GetFileName(rawPath); }
+            try { fileName = Path.GetFileName(path); }
             catch { fileName = null; }
-            if (string.IsNullOrEmpty(fileName))
-                return null;
 
-            string root = TexturesRoot;
-            if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
+            if (!string.IsNullOrEmpty(fileName))
             {
-                try
-                {
-                    string[] found = Directory.GetFiles(root, fileName, SearchOption.AllDirectories);
-                    if (found.Length > 0)
-                        return found[0];
-                }
-                catch
-                {
-                }
+                string indexedPath;
+                if (TextureIndexByName.TryGetValue(fileName, out indexedPath))
+                    return indexedPath;
             }
 
             try
             {
-                if (File.Exists(rawPath))
-                    return Path.GetFullPath(rawPath);
+                if (File.Exists(path))
+                    return Path.GetFullPath(path);
             }
             catch
             {
             }
 
             return null;
+        }
+
+        // Один обход библиотеки текстур на экспорт: поиск по имени файла без диска на каждый материал
+        private Dictionary<string, string> TextureIndexByName
+        {
+            get
+            {
+                if (_textureIndexByName == null)
+                {
+                    _textureIndexByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    string root = TexturesRoot;
+                    if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
+                    {
+                        try
+                        {
+                            string[] files = Directory.GetFiles(root, "*.jpg", SearchOption.AllDirectories);
+                            AddToTextureIndex(files);
+                            files = Directory.GetFiles(root, "*.jpeg", SearchOption.AllDirectories);
+                            AddToTextureIndex(files);
+                            files = Directory.GetFiles(root, "*.png", SearchOption.AllDirectories);
+                            AddToTextureIndex(files);
+                            files = Directory.GetFiles(root, "*.bmp", SearchOption.AllDirectories);
+                            AddToTextureIndex(files);
+                            files = Directory.GetFiles(root, "*.tif", SearchOption.AllDirectories);
+                            AddToTextureIndex(files);
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+                return _textureIndexByName;
+            }
+        }
+
+        private void AddToTextureIndex(string[] files)
+        {
+            for (int i = 0; i < files.Length; i++)
+            {
+                string name = Path.GetFileName(files[i]);
+                if (!string.IsNullOrEmpty(name) && !_textureIndexByName.ContainsKey(name))
+                    _textureIndexByName[name] = files[i];
+            }
         }
 
         private static string TexturesRoot
@@ -983,6 +1146,7 @@ namespace IvanTools
             if (_missing.ContainsKey(rawPath))
                 return;
             _missing[rawPath] = true;
+            _scene.TexturesMissing++;
             if (_scene.Warnings.Count < 200)
                 _scene.Warnings.Add("Текстура не найдена: " + rawPath);
         }
@@ -1001,7 +1165,9 @@ namespace IvanTools
         public readonly List<string> Warnings = new List<string>();
 
         public int ElementCount;
+        public int ElementsWithoutGeometry;
         public int TriangleCount;
+        public int TexturesMissing;
         public DateTime StartTime;
         public DateTime EndTime;
 
@@ -1084,6 +1250,10 @@ namespace IvanTools
         public bool DoubleSided = true;
         public bool Blend;
         public int ImageIndex = -1;
+
+        // Множители UV: repeat / RealWorldScale (Revit отдаёт UV в футах)
+        public float UvMulU = 1f;
+        public float UvMulV = 1f;
     }
 
     internal sealed class GlbImage
@@ -1108,7 +1278,7 @@ namespace IvanTools
             {
                 _path = Path.Combine(Path.GetTempPath(), "ExportToGlb_uv.log");
                 File.WriteAllText(_path,
-                    "ExportToGlb: замер UV (элемент; точки; UV; minU; maxU; minV; maxV; габарит полимеша, фут)" +
+                    "ExportToGlb: замер UV (элемент; точки; UV; minU; maxU; minV; maxV; габарит полимеша, фут; UvMulU; UvMulV)" +
                     Environment.NewLine);
             }
             catch
@@ -1117,7 +1287,7 @@ namespace IvanTools
             }
         }
 
-        internal static void Log(string elementName, PolymeshTopology node, Transform xf)
+        internal static void Log(string elementName, PolymeshTopology node, Transform xf, GlbMaterial material)
         {
             if (_path == null || _written >= MaxPolymeshes)
                 return;
@@ -1148,10 +1318,12 @@ namespace IvanTools
                 double size = (max - min).GetLength();
 
                 string line = string.Format(CultureInfo.InvariantCulture,
-                    "{0};{1};{2};{3:0.####};{4:0.####};{5:0.####};{6:0.####};{7:0.###}",
+                    "{0};{1};{2};{3:0.####};{4:0.####};{5:0.####};{6:0.####};{7:0.###};{8:0.####};{9:0.####}",
                     elementName, node.NumberOfPoints, uvCount,
                     uvCount > 0 ? minU : 0, uvCount > 0 ? maxU : 0,
-                    uvCount > 0 ? minV : 0, uvCount > 0 ? maxV : 0, size);
+                    uvCount > 0 ? minV : 0, uvCount > 0 ? maxV : 0, size,
+                    material != null ? material.UvMulU : 1f,
+                    material != null ? material.UvMulV : 1f);
 
                 File.AppendAllText(_path, line + Environment.NewLine);
                 _written++;
@@ -1308,17 +1480,45 @@ namespace IvanTools
         private int WriteIndexAccessor(List<int> data)
         {
             int[] values = data.ToArray();
-            byte[] bytes = new byte[values.Length * 4];
-            Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+
+            int maxIndex = 0;
+            for (int i = 0; i < values.Length; i++)
+            {
+                if (values[i] > maxIndex)
+                    maxIndex = values[i];
+            }
+
+            // uint16 вдвое короче uint32; допустимо, пока вершин в примитиве < 65536
+            bool small = maxIndex < 65536;
+            byte[] bytes;
+            int componentType;
+            if (small)
+            {
+                ushort[] shorts = new ushort[values.Length];
+                for (int i = 0; i < values.Length; i++)
+                    shorts[i] = (ushort)values[i];
+                bytes = new byte[shorts.Length * 2];
+                Buffer.BlockCopy(shorts, 0, bytes, 0, bytes.Length);
+                componentType = 5123;
+            }
+            else
+            {
+                bytes = new byte[values.Length * 4];
+                Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+                componentType = 5125;
+            }
 
             int offset = (int)_bin.Position;
             _bin.Write(bytes, 0, bytes.Length);
+            // uint16-индексы могут дать длину не кратную 4 -> выравниваем следующий bufferView
+            PadTo4();
 
             _bufferViews.Add("{\"buffer\":0,\"byteOffset\":" + offset.ToString(CultureInfo.InvariantCulture) +
                 ",\"byteLength\":" + bytes.Length.ToString(CultureInfo.InvariantCulture) + ",\"target\":34963}");
 
             _accessors.Add("{\"bufferView\":" + (_bufferViews.Count - 1).ToString(CultureInfo.InvariantCulture) +
-                ",\"componentType\":5125,\"count\":" + values.Length.ToString(CultureInfo.InvariantCulture) +
+                ",\"componentType\":" + componentType.ToString(CultureInfo.InvariantCulture) +
+                ",\"count\":" + values.Length.ToString(CultureInfo.InvariantCulture) +
                 ",\"type\":\"SCALAR\"}");
             return _accessors.Count - 1;
         }
