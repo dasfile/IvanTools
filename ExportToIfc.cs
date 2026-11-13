@@ -9,7 +9,9 @@
 //   - Section Box не обрабатывается специально: элементы целые и могут выходить
 //     за грани куба — это нормальное поведение IFC;
 //   - после экспорта файл читается построчно и в диалог выводится сводка:
-//     схема, счётчики сущностей, стили, PSets/QTO, предупреждения.
+//     схема, счётчики сущностей, стили, PSets/QTO, предупреждения;
+//   - настройки читаются из IvanTools.ini рядом с .rvt (%APPDATA%\IvanTools как
+//     личные дефолты); ключи, которых нет в диалоге, уходят в AddOption.
 //
 // Environment : Autodesk Revit 2023 (.NET Framework 4.8), C# 5
 //
@@ -70,13 +72,17 @@ namespace IvanTools
                 return Result.Cancelled;
             }
 
+            // Порядок поиска: <папка .rvt>\IvanTools.ini -> %APPDATA%\IvanTools\IvanTools.ini -> дефолты
+            IfcConfigFile config = IfcConfigFile.Find(doc.PathName);
+
             IfcExportSettings settings;
             IfcExportPreset[] presets = IfcExportPreset.CreateAll();
-            using (IfcExportDialog dialog = new IfcExportDialog(presets, 1))
+            using (IfcExportDialog dialog = new IfcExportDialog(presets, 1, config))
             {
                 if (dialog.ShowDialog() != DialogResult.OK || dialog.Settings == null)
                     return Result.Cancelled;
                 settings = dialog.Settings;
+                config = dialog.Config;
             }
 
             if (!string.IsNullOrEmpty(settings.MappingFile) && !File.Exists(settings.MappingFile))
@@ -119,6 +125,20 @@ namespace IvanTools
                     if (!string.IsNullOrEmpty(settings.MappingFile))
                         options.FamilyMappingFile = settings.MappingFile;
 
+                    // Ключи, которых нет в диалоге, уходят в движок как есть.
+                    // Незнакомый ключ не должен ломать экспорт: фиксируем и идём дальше.
+                    foreach (KeyValuePair<string, string> extra in settings.ExtraOptions)
+                    {
+                        try
+                        {
+                            options.AddOption(extra.Key, extra.Value);
+                        }
+                        catch (Exception ex)
+                        {
+                            settings.AddOptionFailures.Add(extra.Key + " = " + extra.Value + " (" + ex.Message + ")");
+                        }
+                    }
+
                     ok = doc.Export(folder, baseName, options);
                 }
             }
@@ -153,6 +173,17 @@ namespace IvanTools
             catch (Exception ex)
             {
                 summaryError = ex.Message;
+            }
+
+            // Автосохранение настроек: только по галочке, после того как файл .ifc найден
+            // (для несохранённого документа пишем рядом с .ifc, а не в случайную папку).
+            if (settings.SaveToFile)
+            {
+                string configTarget = IfcConfigFile.TargetForSave(doc.PathName, actualPath);
+                string configStatus;
+                config.TrySave(configTarget, settings, out configStatus);
+                settings.ConfigStatus = configStatus;
+                IfcExportLog.Write("Конфиг: " + configStatus);
             }
 
             string report = BuildReport(actualPath, summary, summaryError, settings, seconds, ok);
@@ -205,6 +236,9 @@ namespace IvanTools
             sb.AppendLine("Размер: " + (size / 1024.0 / 1024.0).ToString("0.00", CultureInfo.InvariantCulture) +
                 " МБ (" + size.ToString() + " Б)");
             sb.AppendLine("Пресет: " + settings.Preset.Caption);
+            sb.AppendLine("Конфиг: " + (settings.ConfigInfo.Length > 0 ? settings.ConfigInfo : "нет данных"));
+            if (!string.IsNullOrEmpty(settings.ConfigStatus))
+                sb.AppendLine("  " + settings.ConfigStatus);
             sb.AppendLine("Схема: " + (summary != null && summary.Schema.Length > 0 ? summary.Schema : "?") +
                 " (RV/DTV в заголовке не различаются)");
             sb.AppendLine("Время: " + seconds.ToString("0.0", CultureInfo.InvariantCulture) + " с");
@@ -238,6 +272,18 @@ namespace IvanTools
                 "    QTO: " + summary.Count("IFCELEMENTQUANTITY").ToString() +
                 "    Стили: " + summary.Count("IFCSURFACESTYLE").ToString() +
                 " (StyledItem: " + summary.Count("IFCSTYLEDITEM").ToString() + ")");
+
+            if (settings.ExtraOptions.Count > 0)
+            {
+                StringBuilder extra = new StringBuilder();
+                foreach (KeyValuePair<string, string> kv in settings.ExtraOptions)
+                {
+                    if (extra.Length > 0)
+                        extra.Append(", ");
+                    extra.Append(kv.Key).Append("=").Append(kv.Value);
+                }
+                sb.AppendLine("AddOption: " + settings.ExtraOptions.Count.ToString() + " (" + extra.ToString() + ")");
+            }
 
             List<string> warnings = CollectWarnings(summary, settings, size, ok);
             if (warnings.Count > 0)
@@ -283,6 +329,11 @@ namespace IvanTools
             if (summary.Schema.Length > 0 &&
                 summary.Schema.ToUpperInvariant().IndexOf(expected, StringComparison.Ordinal) < 0)
                 warnings.Add("Схема в файле (" + summary.Schema + ") не совпадает с пресетом (" + expected + ")");
+
+            for (int i = 0; i < settings.ConfigErrors.Count; i++)
+                warnings.Add("конфиг: " + settings.ConfigErrors[i]);
+            for (int i = 0; i < settings.AddOptionFailures.Count; i++)
+                warnings.Add("AddOption не принят: " + settings.AddOptionFailures[i]);
 
             return warnings;
         }
@@ -359,11 +410,541 @@ namespace IvanTools
         public bool SplitWallsByLevel;
         public string MappingFile = "";
 
+        // Конфиг (IvanTools.ini)
+        public bool SaveToFile;
+        public string ConfigInfo = "";
+        public string ConfigStatus = "";
+        public readonly List<string> ConfigErrors = new List<string>();
+        public readonly SortedDictionary<string, string> ExtraOptions =
+            new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        public readonly List<string> AddOptionFailures = new List<string>();
+
         public IFCVersion Version
         {
             get { return Preset.Version; }
         }
     }
+
+    // =========================================================================
+    // Конфиг: IvanTools.ini (INI-подобный: [ifc], key = value, ';'/'#' — комментарий)
+    // =========================================================================
+    internal sealed class IfcConfigFile
+    {
+        internal const string SectionName = "ifc";
+        private const string FileName = "IvanTools.ini";
+
+        // Порядок ключей при записи нового файла и при добавлении недостающих
+        private static readonly string[] KnownKeys = new string[]
+        {
+            "preset", "base_quantities", "split_walls_by_level", "mapping_file"
+        };
+
+        internal string FilePath;
+        internal readonly List<string> Errors = new List<string>();
+        internal readonly Dictionary<string, string> Values =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // [ifc:PRESET] читаются, но применяются только с v1.1
+        internal readonly Dictionary<string, Dictionary<string, string>> PresetSections =
+            new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+
+        internal bool Exists
+        {
+            get
+            {
+                try { return FilePath != null && File.Exists(FilePath); }
+                catch { return false; }
+            }
+        }
+
+        internal string Folder
+        {
+            get
+            {
+                try
+                {
+                    return string.IsNullOrEmpty(FilePath) ? null : System.IO.Path.GetDirectoryName(FilePath);
+                }
+                catch { return null; }
+            }
+        }
+
+        internal static string ProjectPath(string documentPath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(documentPath))
+                    return null;
+                string folder = System.IO.Path.GetDirectoryName(documentPath);
+                if (string.IsNullOrEmpty(folder))
+                    return null;
+                return System.IO.Path.Combine(folder, FileName);
+            }
+            catch { return null; }
+        }
+
+        internal static string UserPath()
+        {
+            try
+            {
+                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                if (string.IsNullOrEmpty(appData))
+                    return null;
+                return System.IO.Path.Combine(System.IO.Path.Combine(appData, "IvanTools"), FileName);
+            }
+            catch { return null; }
+        }
+
+        // Порядок поиска: проект -> %APPDATA% -> дефолты. Никогда не бросает.
+        internal static IfcConfigFile Find(string documentPath)
+        {
+            string project = ProjectPath(documentPath);
+            if (project != null && File.Exists(project))
+                return Load(project);
+
+            string user = UserPath();
+            if (user != null && File.Exists(user))
+                return Load(user);
+
+            IfcConfigFile none = new IfcConfigFile();
+            none.FilePath = project;    // куда писать, если пользователь включит галочку
+            return none;
+        }
+
+        // Куда писать: папка проекта, а для несохранённого документа — папка готового .ifc
+        internal static string TargetForSave(string documentPath, string exportedPath)
+        {
+            string project = ProjectPath(documentPath);
+            if (project != null)
+                return project;
+            try
+            {
+                string folder = string.IsNullOrEmpty(exportedPath) ? null : System.IO.Path.GetDirectoryName(exportedPath);
+                if (string.IsNullOrEmpty(folder))
+                    return null;
+                return System.IO.Path.Combine(folder, FileName);
+            }
+            catch { return null; }
+        }
+
+        internal static IfcConfigFile Load(string path)
+        {
+            IfcConfigFile config = new IfcConfigFile();
+            config.FilePath = path;
+            if (string.IsNullOrEmpty(path))
+            {
+                config.Errors.Add("путь к конфигу не задан");
+                return config;
+            }
+
+            string section = "";
+            try
+            {
+                using (StreamReader reader = new StreamReader(path, Encoding.UTF8, true))
+                {
+                    int number = 0;
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        number++;
+                        string trimmed = line.Trim();
+                        if (trimmed.Length > 0 && trimmed[0] == '\uFEFF')
+                            trimmed = trimmed.Substring(1).TrimStart();   // двойной BOM после пересохранения
+                        if (trimmed.Length == 0)
+                            continue;
+                        if (trimmed[0] == ';' || trimmed[0] == '#')
+                            continue;
+
+                        if (trimmed[0] == '[')
+                        {
+                            int close = trimmed.IndexOf(']');
+                            if (close < 0)
+                            {
+                                config.Errors.Add("строка " + number.ToString() + ": в заголовке секции нет ']'");
+                                continue;
+                            }
+                            section = trimmed.Substring(1, close - 1).Trim();
+                            continue;
+                        }
+
+                        int equals = trimmed.IndexOf('=');
+                        if (equals <= 0)
+                        {
+                            config.Errors.Add("строка " + number.ToString() + ": ожидается 'key = value'");
+                            continue;
+                        }
+                        string key = trimmed.Substring(0, equals).Trim();
+                        if (key.Length == 0)
+                        {
+                            config.Errors.Add("строка " + number.ToString() + ": пустой ключ");
+                            continue;
+                        }
+                        string value = trimmed.Substring(equals + 1).Trim();
+
+                        Dictionary<string, string> target = config.Section(section);
+                        if (target == null)
+                            continue;   // чужая секция (например [glb]) — молча пропускаем
+                        if (target.ContainsKey(key))
+                            config.Errors.Add("строка " + number.ToString() + ": ключ '" + key +
+                                "' повторяется — берётся последнее значение");
+                        target[key] = value;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                config.Errors.Add("файл не прочитан: " + ex.Message);
+            }
+            return config;
+        }
+
+        private Dictionary<string, string> Section(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return Values;      // ключи до первой секции считаем основными
+            if (name.Equals(SectionName, StringComparison.OrdinalIgnoreCase))
+                return Values;
+            if (name.Length > SectionName.Length + 1 &&
+                name.StartsWith(SectionName + ":", StringComparison.OrdinalIgnoreCase))
+            {
+                string preset = name.Substring(SectionName.Length + 1).Trim();
+                Dictionary<string, string> values;
+                if (!PresetSections.TryGetValue(preset, out values))
+                {
+                    values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    PresetSections[preset] = values;
+                }
+                return values;
+            }
+            return null;
+        }
+
+        // Применение файла к настройкам: известные ключи -> свойства, прочие -> AddOption
+        internal void Apply(IfcExportSettings settings, IfcExportPreset[] presets)
+        {
+            if (settings == null)
+                return;
+
+            string text;
+            bool flag;
+
+            // Пресет приносит свои дефолты; явные ключи файла применяются поверх
+            IfcExportPreset preset = settings.Preset;
+            if (Values.TryGetValue("preset", out text))
+            {
+                IfcExportPreset match = FindPreset(presets, text);
+                if (match != null)
+                    preset = match;
+                else
+                    Errors.Add("preset = " + text +
+                        ": неизвестный пресет (есть IFC4, IFC4RV, IFC2x3CV2) — оставлен текущий");
+            }
+            if (preset != null)
+            {
+                settings.Preset = preset;
+                settings.BaseQuantities = preset.DefaultBaseQuantities;
+                settings.SplitWallsByLevel = false;
+            }
+
+            if (Values.TryGetValue("base_quantities", out text))
+            {
+                if (TryParseBool(text, out flag))
+                    settings.BaseQuantities = flag;
+                else
+                    Errors.Add("base_quantities = " + text + ": ожидается true/false");
+            }
+            if (Values.TryGetValue("split_walls_by_level", out text))
+            {
+                if (TryParseBool(text, out flag))
+                    settings.SplitWallsByLevel = flag;
+                else
+                    Errors.Add("split_walls_by_level = " + text + ": ожидается true/false");
+            }
+            if (Values.TryGetValue("mapping_file", out text))
+                settings.MappingFile = ResolvePath(text);
+
+            CollectExtras(settings);
+        }
+
+        // Только «прочие» ключи: нужны и при загрузке, и перед экспортом
+        internal void CollectExtras(IfcExportSettings settings)
+        {
+            if (settings == null)
+                return;
+            settings.ExtraOptions.Clear();
+            foreach (KeyValuePair<string, string> kv in Values)
+            {
+                if (IsKnownKey(kv.Key))
+                    continue;
+                if (string.IsNullOrEmpty(kv.Value))
+                    continue;       // пустое значение передавать нечего
+                settings.ExtraOptions[kv.Key] = kv.Value;
+            }
+        }
+
+        internal string DescribeForReport()
+        {
+            if (!Exists)
+            {
+                if (FilePath == null)
+                    return "не найден (документ не сохранён) — значения по умолчанию";
+                return "не найден (" + FilePath + ") — значения по умолчанию";
+            }
+            string text = FilePath;
+            if (PresetSections.Count > 0)
+                text += " [секции [ifc:PRESET] прочитаны, применяются с v1.1]";
+            return text;
+        }
+
+        internal static bool TryParseBool(string text, out bool value)
+        {
+            string t = (text ?? "").Trim().ToLowerInvariant();
+            if (t == "true" || t == "1" || t == "yes" || t == "on" || t == "да")
+            {
+                value = true;
+                return true;
+            }
+            if (t == "false" || t == "0" || t == "no" || t == "off" || t == "нет")
+            {
+                value = false;
+                return true;
+            }
+            value = false;
+            return false;
+        }
+
+        private static bool IsKnownKey(string key)
+        {
+            for (int i = 0; i < KnownKeys.Length; i++)
+            {
+                if (KnownKeys[i].Equals(key, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        private static IfcExportPreset FindPreset(IfcExportPreset[] presets, string text)
+        {
+            string name = (text ?? "").Trim();
+            if (name.Length == 0)
+                return null;
+            if (name.Equals("2x3", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("ifc2x3", StringComparison.OrdinalIgnoreCase))
+                name = "IFC2x3CV2";
+
+            for (int i = 0; i < presets.Length; i++)
+            {
+                if (presets[i].Version.ToString().Equals(name, StringComparison.OrdinalIgnoreCase))
+                    return presets[i];
+            }
+            return null;
+        }
+
+        private string ResolvePath(string text)
+        {
+            string raw = Unquote(text);
+            if (raw.Length == 0)
+                return "";
+            try
+            {
+                raw = Environment.ExpandEnvironmentVariables(raw);
+                if (System.IO.Path.IsPathRooted(raw))
+                    return System.IO.Path.GetFullPath(raw);
+                string folder = Folder;
+                if (string.IsNullOrEmpty(folder))
+                    return System.IO.Path.GetFullPath(raw);
+                return System.IO.Path.GetFullPath(System.IO.Path.Combine(folder, raw));
+            }
+            catch { return raw; }
+        }
+
+        private static string Unquote(string text)
+        {
+            string t = (text ?? "").Trim();
+            if (t.Length > 1 && t[0] == '"' && t[t.Length - 1] == '"')
+                t = t.Substring(1, t.Length - 2).Trim();
+            return t;
+        }
+
+        // Обновляет ключи внутри [ifc], не трогая комментарии и чужие ключи.
+        // Атомарность: пишем .tmp, затем Replace/Move.
+        internal bool TrySave(string targetPath, IfcExportSettings settings, out string status)
+        {
+            status = "";
+            if (string.IsNullOrEmpty(targetPath))
+            {
+                status = "не записано: папку определить не удалось";
+                return false;
+            }
+            if (settings == null)
+            {
+                status = "не записано: нет настроек";
+                return false;
+            }
+
+            try
+            {
+                string folder = System.IO.Path.GetDirectoryName(targetPath);
+                if (!string.IsNullOrEmpty(folder) && !Directory.Exists(folder))
+                    Directory.CreateDirectory(folder);
+
+                Dictionary<string, string> wanted = WantedValues(settings, folder);
+                bool existed = File.Exists(targetPath);
+                List<string> lines = existed
+                    ? new List<string>(File.ReadAllLines(targetPath))
+                    : NewFileLines(wanted);
+
+                if (existed)
+                    MergeKnownKeys(lines, wanted);
+
+                string temp = targetPath + ".tmp";
+                File.WriteAllLines(temp, lines.ToArray(), new UTF8Encoding(false));
+                if (existed)
+                {
+                    try
+                    {
+                        File.Replace(temp, targetPath, null, true);
+                    }
+                    catch
+                    {
+                        // FAT/сетевые папки: File.Replace может быть недоступен
+                        File.Copy(temp, targetPath, true);
+                        File.Delete(temp);
+                    }
+                }
+                else
+                {
+                    File.Move(temp, targetPath);
+                }
+
+                FilePath = targetPath;
+                status = "записано: " + targetPath;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                status = "не записано: " + ex.Message;
+                return false;
+            }
+        }
+
+        private Dictionary<string, string> WantedValues(IfcExportSettings settings, string folder)
+        {
+            Dictionary<string, string> wanted = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            wanted["preset"] = settings.Preset.Version.ToString();
+            wanted["base_quantities"] = settings.BaseQuantities ? "true" : "false";
+            wanted["split_walls_by_level"] = settings.SplitWallsByLevel ? "true" : "false";
+            wanted["mapping_file"] = RelativeTo(folder, settings.MappingFile);
+            return wanted;
+        }
+
+        private static List<string> NewFileLines(Dictionary<string, string> wanted)
+        {
+            List<string> lines = new List<string>();
+            lines.Add("; IvanTools — настройки экспорта IFC");
+            lines.Add("; Комментарий — строка, начинающаяся с ';' или '#'");
+            lines.Add("; Ключи, которых нет в диалоге, передаются в IFCExportOptions.AddOption");
+            lines.Add("");
+            lines.Add("[" + SectionName + "]");
+            for (int i = 0; i < KnownKeys.Length; i++)
+                lines.Add(KnownKeys[i] + " = " + wanted[KnownKeys[i]]);
+            lines.Add("");
+            lines.Add("; --- ключи, которых нет в диалоге (уйдут в AddOption) ---");
+            lines.Add("; tesselation_lod = Medium");
+            lines.Add("; store_ifc_guid = true");
+            lines.Add("");
+            return lines;
+        }
+
+        private static void MergeKnownKeys(List<string> lines, Dictionary<string, string> wanted)
+        {
+            int start = -1;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                if (lines[i].Trim().Equals("[" + SectionName + "]", StringComparison.OrdinalIgnoreCase))
+                {
+                    start = i;
+                    break;
+                }
+            }
+
+            if (start < 0)
+            {
+                if (lines.Count > 0 && lines[lines.Count - 1].Trim().Length > 0)
+                    lines.Add("");
+                lines.Add("[" + SectionName + "]");
+                for (int i = 0; i < KnownKeys.Length; i++)
+                    lines.Add(KnownKeys[i] + " = " + wanted[KnownKeys[i]]);
+                return;
+            }
+
+            int end = lines.Count;
+            for (int i = start + 1; i < lines.Count; i++)
+            {
+                string t = lines[i].Trim();
+                if (t.Length > 0 && t[0] == '[')
+                {
+                    end = i;
+                    break;
+                }
+            }
+
+            List<string> missing = new List<string>();
+            for (int k = 0; k < KnownKeys.Length; k++)
+            {
+                string key = KnownKeys[k];
+                bool replaced = false;
+                for (int i = start + 1; i < end; i++)
+                {
+                    string t = lines[i].Trim();
+                    if (t.Length == 0 || t[0] == ';' || t[0] == '#')
+                        continue;
+                    int equals = t.IndexOf('=');
+                    if (equals <= 0)
+                        continue;
+                    if (t.Substring(0, equals).Trim().Equals(key, StringComparison.OrdinalIgnoreCase))
+                    {
+                        lines[i] = key + " = " + wanted[key];
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced)
+                    missing.Add(key);
+            }
+
+            if (missing.Count == 0)
+                return;
+
+            int insertAt = end;
+            while (insertAt > start + 1 && lines[insertAt - 1].Trim().Length == 0)
+                insertAt--;
+            for (int i = 0; i < missing.Count; i++)
+                lines.Insert(insertAt + i, missing[i] + " = " + wanted[missing[i]]);
+        }
+
+        // Путь маппинга: внутри папки ini пишем относительным, иначе — абсолютным
+        private static string RelativeTo(string folder, string fullPath)
+        {
+            if (string.IsNullOrEmpty(fullPath))
+                return "";
+            if (string.IsNullOrEmpty(folder))
+                return fullPath;
+            try
+            {
+                string baseDir = folder.TrimEnd('\\') + "\\";
+                Uri baseUri = new Uri(baseDir);
+                Uri fileUri = new Uri(fullPath);
+                string relative = Uri.UnescapeDataString(baseUri.MakeRelativeUri(fileUri).ToString()).Replace('/', '\\');
+                if (relative.Length == 0 ||
+                    relative.StartsWith("..", StringComparison.Ordinal) ||
+                    System.IO.Path.IsPathRooted(relative))
+                    return fullPath;
+                return relative;
+            }
+            catch { return fullPath; }
+        }
+    }
+
     // =========================================================================
     // Диалог настроек
     // =========================================================================
@@ -374,12 +955,19 @@ namespace IvanTools
         private readonly CheckBox _qto;
         private readonly CheckBox _split;
         private readonly TextBox _mapping;
+        private readonly Label _configLabel;
+        private readonly CheckBox _saveToFile;
+        private readonly ToolTip _tips = new ToolTip();
+        private IfcConfigFile _config;
+        private bool _suppressPresetDefaults;
 
         public IfcExportSettings Settings { get; private set; }
+        public IfcConfigFile Config { get { return _config; } }
 
-        public IfcExportDialog(IfcExportPreset[] presets, int selectedIndex)
+        public IfcExportDialog(IfcExportPreset[] presets, int selectedIndex, IfcConfigFile config)
         {
             _presets = presets;
+            _config = config != null ? config : new IfcConfigFile();
 
             Text = "Экспорт активного 3D-вида в IFC";
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -387,7 +975,7 @@ namespace IvanTools
             MaximizeBox = false;
             MinimizeBox = false;
             ShowInTaskbar = false;
-            ClientSize = new System.Drawing.Size(560, 330);
+            ClientSize = new System.Drawing.Size(560, 356);
             Font = new System.Drawing.Font("Segoe UI", 9f);
 
             GroupBox group = new GroupBox();
@@ -432,15 +1020,37 @@ namespace IvanTools
             browse.Click += new EventHandler(OnBrowse);
             Controls.Add(browse);
 
+            _configLabel = new Label();
+            _configLabel.Bounds = new System.Drawing.Rectangle(12, 246, 536, 18);
+            _configLabel.AutoEllipsis = true;
+            Controls.Add(_configLabel);
+
+            Button load = new Button();
+            load.Text = "Загрузить…";
+            load.Bounds = new System.Drawing.Rectangle(12, 266, 104, 26);
+            load.Click += new EventHandler(OnLoadConfig);
+            Controls.Add(load);
+
+            Button saveAs = new Button();
+            saveAs.Text = "Сохранить как…";
+            saveAs.Bounds = new System.Drawing.Rectangle(122, 266, 140, 26);
+            saveAs.Click += new EventHandler(OnSaveConfigAs);
+            Controls.Add(saveAs);
+
+            _saveToFile = new CheckBox();
+            _saveToFile.Text = "Сохранять настройки в файл проекта";
+            _saveToFile.Bounds = new System.Drawing.Rectangle(272, 268, 280, 22);
+            Controls.Add(_saveToFile);
+
             Button ok = new Button();
             ok.Text = "Экспорт";
-            ok.Bounds = new System.Drawing.Rectangle(340, 292, 100, 27);
+            ok.Bounds = new System.Drawing.Rectangle(340, 316, 100, 27);
             ok.DialogResult = DialogResult.OK;
             Controls.Add(ok);
 
             Button cancel = new Button();
             cancel.Text = "Отмена";
-            cancel.Bounds = new System.Drawing.Rectangle(448, 292, 100, 27);
+            cancel.Bounds = new System.Drawing.Rectangle(448, 316, 100, 27);
             cancel.DialogResult = DialogResult.Cancel;
             Controls.Add(cancel);
 
@@ -451,10 +1061,13 @@ namespace IvanTools
             int index = selectedIndex >= 0 && selectedIndex < _radios.Length ? selectedIndex : 0;
             _radios[index].Checked = true;
             ApplyPresetDefaults(index);
+            ApplyConfig(_config);
         }
 
         private void OnPresetChanged(object sender, EventArgs e)
         {
+            if (_suppressPresetDefaults)
+                return;     // значения из конфига не должны затираться дефолтами пресета
             RadioButton radio = sender as RadioButton;
             if (radio == null || !radio.Checked)
                 return;
@@ -467,6 +1080,161 @@ namespace IvanTools
                 return;
             _qto.Checked = _presets[index].DefaultBaseQuantities;
             _split.Checked = false;
+        }
+
+        // ---------------------------------------------------------------------
+        // Конфиг: путь, загрузка, сохранение
+        // ---------------------------------------------------------------------
+        private IfcExportSettings BuildSettings()
+        {
+            int index = 0;
+            for (int i = 0; i < _radios.Length; i++)
+            {
+                if (_radios[i].Checked)
+                    index = i;
+            }
+
+            IfcExportSettings settings = new IfcExportSettings();
+            settings.Preset = _presets[index];
+            settings.BaseQuantities = _qto.Checked;
+            settings.SplitWallsByLevel = _split.Checked;
+            settings.MappingFile = _mapping.Text.Trim();
+            settings.SaveToFile = _saveToFile.Checked;
+            return settings;
+        }
+
+        private int IndexOfPreset(IfcExportPreset preset)
+        {
+            if (preset == null)
+                return -1;
+            for (int i = 0; i < _presets.Length; i++)
+            {
+                if (_presets[i].Version == preset.Version)
+                    return i;
+            }
+            return -1;
+        }
+
+        private void ApplyConfig(IfcConfigFile config)
+        {
+            if (config != null)
+                _config = config;
+            if (_config == null)
+                _config = new IfcConfigFile();
+
+            if (_config.Values.Count > 0)
+            {
+                _suppressPresetDefaults = true;
+                try
+                {
+                    IfcExportSettings snapshot = BuildSettings();
+                    _config.Apply(snapshot, _presets);
+
+                    int index = IndexOfPreset(snapshot.Preset);
+                    if (index >= 0)
+                        _radios[index].Checked = true;
+                    _qto.Checked = snapshot.BaseQuantities;
+                    _split.Checked = snapshot.SplitWallsByLevel;
+                    _mapping.Text = snapshot.MappingFile;
+                }
+                finally
+                {
+                    _suppressPresetDefaults = false;
+                }
+            }
+
+            // Галочка включается сама, только если файл уже существует
+            _saveToFile.Checked = _config.Exists;
+            UpdateConfigLabel();
+        }
+
+        private void UpdateConfigLabel()
+        {
+            string text;
+            if (_config == null || _config.FilePath == null)
+                text = "Настройки: файл не найден (документ не сохранён) — значения по умолчанию";
+            else if (_config.Exists)
+                text = "Настройки: " + _config.FilePath;
+            else
+                text = "Настройки: " + _config.FilePath + " (ещё не создан)";
+
+            if (_config != null && _config.Errors.Count > 0)
+                text += "   [замечаний: " + _config.Errors.Count.ToString() + "]";
+
+            _configLabel.Text = text;
+            _tips.SetToolTip(_configLabel, text);
+        }
+
+        private void OnLoadConfig(object sender, EventArgs e)
+        {
+            using (OpenFileDialog open = new OpenFileDialog())
+            {
+                open.Title = "Настройки экспорта IFC (IvanTools.ini)";
+                open.Filter = "Настройки IvanTools (*.ini)|*.ini|Все файлы (*.*)|*.*";
+                if (_config != null && _config.FilePath != null)
+                {
+                    try { open.InitialDirectory = System.IO.Path.GetDirectoryName(_config.FilePath); }
+                    catch { }
+                }
+                if (open.ShowDialog(this) != DialogResult.OK)
+                    return;
+
+                IfcConfigFile loaded = IfcConfigFile.Load(open.FileName);
+                ApplyConfig(loaded);
+                _saveToFile.Checked = true;
+
+                if (loaded.Errors.Count > 0)
+                {
+                    StringBuilder sb = new StringBuilder();
+                    sb.AppendLine("Файл прочитан, но есть замечания:");
+                    int limit = loaded.Errors.Count > 10 ? 10 : loaded.Errors.Count;
+                    for (int i = 0; i < limit; i++)
+                        sb.AppendLine("  • " + loaded.Errors[i]);
+                    if (loaded.Errors.Count > limit)
+                        sb.AppendLine("  … ещё " + (loaded.Errors.Count - limit).ToString());
+                    MessageBox.Show(this, sb.ToString(), "Экспорт IFC",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+        }
+
+        private void OnSaveConfigAs(object sender, EventArgs e)
+        {
+            using (SaveFileDialog save = new SaveFileDialog())
+            {
+                save.Title = "Сохранить настройки экспорта IFC";
+                save.Filter = "Настройки IvanTools (*.ini)|*.ini";
+                save.DefaultExt = "ini";
+                save.AddExtension = true;
+                save.OverwritePrompt = true;
+                save.FileName = "IvanTools.ini";
+                if (_config != null && _config.FilePath != null)
+                {
+                    try
+                    {
+                        string folder = System.IO.Path.GetDirectoryName(_config.FilePath);
+                        if (!string.IsNullOrEmpty(folder))
+                            save.InitialDirectory = folder;
+                    }
+                    catch { }
+                }
+                if (save.ShowDialog(this) != DialogResult.OK)
+                    return;
+
+                if (_config == null)
+                    _config = new IfcConfigFile();
+
+                string status;
+                if (!_config.TrySave(save.FileName, BuildSettings(), out status))
+                {
+                    MessageBox.Show(this, status, "Экспорт IFC",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                _saveToFile.Checked = true;
+                UpdateConfigLabel();
+            }
         }
 
         private void OnBrowse(object sender, EventArgs e)
@@ -494,18 +1262,18 @@ namespace IvanTools
                 return;
             }
 
-            int index = 0;
-            for (int i = 0; i < _radios.Length; i++)
-            {
-                if (_radios[i].Checked)
-                    index = i;
-            }
+            IfcExportSettings settings = BuildSettings();
 
-            IfcExportSettings settings = new IfcExportSettings();
-            settings.Preset = _presets[index];
-            settings.BaseQuantities = _qto.Checked;
-            settings.SplitWallsByLevel = _split.Checked;
-            settings.MappingFile = mapping;
+            // «Прочие» ключи конфига и его замечания — в настройки, чтобы ушли в экспорт и отчёт
+            if (_config != null)
+            {
+                _config.CollectExtras(settings);
+                settings.ConfigInfo = _config.DescribeForReport();
+                settings.ConfigErrors.AddRange(_config.Errors);
+            }
+            if (settings.ConfigInfo.Length == 0)
+                settings.ConfigInfo = "не найден — значения по умолчанию";
+
             Settings = settings;
         }
     }
@@ -638,6 +1406,11 @@ namespace IvanTools
             Write("QTO: " + settings.BaseQuantities.ToString() +
                 "; Split по уровням: " + settings.SplitWallsByLevel.ToString());
             Write("Mapping: " + (string.IsNullOrEmpty(settings.MappingFile) ? "(таблица Revit по умолчанию)" : settings.MappingFile));
+            Write("Конфиг: " + (string.IsNullOrEmpty(settings.ConfigInfo) ? "(не найден — значения по умолчанию)" : settings.ConfigInfo));
+            if (settings.ConfigErrors.Count > 0)
+                Write("Конфиг-замечания: " + string.Join(" | ", settings.ConfigErrors.ToArray()));
+            foreach (KeyValuePair<string, string> extra in settings.ExtraOptions)
+                Write("AddOption: " + extra.Key + " = " + extra.Value);
             Write("Файл: " + targetPath);
         }
 
