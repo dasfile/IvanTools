@@ -131,18 +131,26 @@ h = 0.3048f
 
 ## 7. Материалы (`MaterialLibrary`)
 
-Кэш: `Dictionary<ElementId, GlbMaterial>`; `MaterialId == ElementId.InvalidElementId` → материал по умолчанию `Default` (цвет `node.Color`, прозрачность `node.Transparency`).
+Кэш: ключ = документ + `MaterialId` + прозрачность + **цвет `node.Color`** (один материал может быть переопределён в виде разными цветами на разных элементах); `MaterialId == ElementId.InvalidElementId` → материал `Default`.
 
-1. **Базовый цвет.** `MaterialNode.Color` — «цвет, которым материал отрисовывается»; свойство `HasColor` в Revit 2023 **отсутствует** (проверено рефлексией), `Color` возвращается всегда → `BaseColorFactor = (R/255, G/255, B/255)`.
+**Правило выбора цвета (критично, проверено на реальной модели).** Revit рисует закрашенный вид либо по отделке, либо по цвету материала — этим управляет `Material.UseRenderAppearanceForShading`:
+
+> «True to use the render appearance settings for shaded view appearance; **false to use the material's color and transparency value** for shaded view appearance.»
+
+* `false` → берётся `node.Color` (цвет, которым материал отрисован, включая переопределения вида), **текстура не применяется**. Иначе «ярко-красный монолитный бетон» с выключенной отделкой становится серой бетонной текстурой (регрессия, замеченная на лестнице);
+* `true` → применяется текстура, а множитель = **тинт текстуры** (`common_tint_toggle` / `common_tint_color`: в Revit цвет умножается на картинку); при выключенном тинте — белый;
+* текстура не нашлась → остаётся цвет материала (без обнуления в белый);
+* диагностика каждого материала пишется в `%TEMP%\ExportToGlb_materials.log` (`Material.Color`, `node.Color`, флаг, тинт, решение).
+
+1. **Базовый цвет.** `MaterialNode.Color` — «цвет, которым материал отрисовывается»; `HasColor` в Revit 2023 **нет** (проверено рефлексией). Документация предупреждает, что значение может отличаться от `Material.Color` из-за переопределений визуализации — используется как диагностический признак. Значение переводится в линейное пространство: `baseColorFactor = SrgbToLinear(RGB/255)`.
 2. **Текстура (baseColorTexture).** Доступ к ассету — `MaterialNode.GetAppearance()` (есть в 2023) либо `Material.AppearanceAssetId` → `AppearanceAssetElement.GetRenderingAsset()`:
-   * `asset.FindByName("generic_diffuse")` (для других схем — `"wallpaint_color"`, `"masonrycmu_color"`, `"metal_color"`, `"wood_color"`; перебор списка кандидатов, а не жёсткая схема);
+   * `asset.FindByName("generic_diffuse")` (для других схем — `"wallpaint_color"`, `"masonrycmu_color"`, `"metal_color"`, `"wood_color"` и т.п.; перебор списка кандидатов, а не жёсткая схема);
    * `prop.GetSingleConnectedAsset()` → ассет `UnifiedBitmap`; путь — `FindByName("unifiedbitmap_Bitmap") as AssetPropertyString`;
-   * **фактические имена ключей проверить логом на реальной модели** (вспомогательные константы `Autodesk.Revit.DB.Visual.Generic.GenericDiffuse`, `...Visual.UnifiedBitmap.UnifiedbitmapBitmap` существуют, но их строковые значения документацией не гарантированы). Пока ключ не подтверждён — fallback-цвет, а не падение;
-   * резолв пути: абсолютный как есть; относительный — `%ProgramFiles(x86)%\Common Files\Autodesk Shared\Materials\Textures\...` (папка на машине есть), затем папка проекта;
-   * файла нет / не читается → предупреждение в `Scene.Warnings` + остаётся `BaseColorFactor`.
+   * **в `AssetPropertyString` Revit хранит несколько вариантов пути через `|`**, а слеши бывают смешаны (`Textures\/1/Mats/...`) → строка делится по `|`, нормализуется, проверяется `File.Exists`, затем ищется файл с тем же именем в библиотеке текстур Autodesk (индекс строится один раз за экспорт);
+   * файл не найден → предупреждение в `Scene.Warnings` + цвет материала (`Scene.TexturesMissing`).
 3. **Формат картинок.** Спецификация glTF: только `image/png` и `image/jpeg`. `.bmp/.tif/.tga` конвертируются в PNG в памяти через `System.Drawing` (`System.Drawing.Image.FromFile` → `MemoryStream` → `Save(ImageFormat.Png)`); картинка встраивается в BIN-чанк (`images[i].bufferView` + `mimeType`). Кэш по нормализованному пути.
 4. **Прозрачность.** `Alpha = 1 - node.Transparency` (0 — непрозрачный, 1 — полностью прозрачный); `Alpha < 0.999` → `alphaMode = "BLEND"`, иначе `"OPAQUE"`; `baseColorFactor[3] = Alpha`.
-5. **Шероховатость.** `Material.Smoothness` (документировано: 0..100) → `Roughness = 1 - Smoothness/100`, зажать в `[0.02, 1.0]`. Fallback при отсутствии материала — `0.5`. `MaterialNode.Glossiness` **не использовать**: диапазон в документации не указан (0..128 или 0..100 — предположение).
+5. **Шероховатость.** Источник — `generic_glossiness` ассета (документированный диапазон 0..1): `Roughness = 1 - glossiness`; если свойства нет — `0.5`. `MaterialNode.Glossiness` **не использовать** (диапазон в документации не указан).
 6. **Металличность.** Ассет содержит `metal_color` / `GenericIsMetal == 1` → `Metallic = 0.9`, иначе `0.0`.
 7. **Двусторонность.** `doubleSided = true` для всех материалов: страхует стекло, тонкие листы и вывернутые нормали ценой небольшой потери производительности в Blender. Решение намеренное, менять только осознанно.
 
@@ -348,6 +356,8 @@ csc /nologo /warn:4 /target:library /out:"$env:TEMP\ExportToGlb_check.dll" `
 2. Цвета выглядели «нежнее и голубее» (по отзыву) — это отсутствие пересчёта sRGB → linear для `baseColorFactor` (glTF ожидает линейные значения). Добавлено с флагом `ConvertSrgbToLinear`.
 3. UV в футах подтверждены логом → добавлен пересчёт по `RealWorldScale` (§8).
 
+**Второй прогон (после починки текстур):** 1250 элементов (133 без геометрии), 1141 примитив, 28 169 треугольников, 26 материалов, **2 текстуры встроено, 0 не найдено**, 1.4 с, 2.41 МБ. Обнаружена регрессия: «ярко-красный монолитный бетон» стал серым — найденная текстура перекрыла цвет материала. Причина документированная: `Material.UseRenderAppearanceForShading == false` означает, что закрашенный вид строится по цвету материала, а не по отделке. Исправлено правилом §7 (плюс тинт текстуры, ключ кэша с цветом, лог материалов и счётчики «с текстурами / плоский цвет»).
+
 Проверено:
 
 * `csc /warn:4`: **0 ошибок, 0 предупреждений**; файл в UTF-8 с BOM.
@@ -383,4 +393,18 @@ csc /nologo /warn:4 /target:library /out:"$env:TEMP\ExportToGlb_check.dll" `
 **Что даёт максимум, но вне плагина:** `gltfpack` (meshopt) или `gltf-transform` (Draco) — 5–10×, ценой внешнего тулчейна и поддержки расширений. Логичный шаг «публикации» для показательных моделей, а не функция Revit-плагина.
 
 Практическая рекомендация: `.glb` — рабочая единица (просмотр, импорт в Blender), `.glb.7z` — архив/пересылка.
+
+**Решение по Draco (зафиксировано):** в плагин **не внедряем**. Причины: (1) кодировщик Draco — нативный C++ без официального .NET-биндинга, это ломает принцип «один `.cs` без внешних DLL» и совместимость с `CsHotLoader`; (2) Draco — сжатие с потерями и требует декодера у получателя; (3) рабочая практика `.glb.zip` уже достаточна — Online3DViewer такие файлы открывает. Draco остаётся опцией пост-обработки для «публикационных» копий моделей.
+
+**Что почитать по теме (от базы к продвинутому):**
+
+1. Спецификация glTF 2.0 (buffers, accessors, meshes) — <https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html>
+2. `KHR_draco_mesh_compression` — <https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_draco_mesh_compression>
+3. Draco (Google) — кодек и энкодер — <https://github.com/google/draco>
+4. glTF-Transform (`draco`, `quantize`, `optimize`, `meshopt`) — <https://gltf-transform.dev/>
+5. meshoptimizer / `gltfpack` (`EXT_meshopt_compression`) — <https://github.com/zeux/meshoptimizer>, <https://meshoptimizer.org/gltf/>
+6. Валидатор glTF (проверка файлов после сжатия) — <https://github.khronos.org/glTF-Validator/>
+7. Online3DViewer (в зависимостях — `draco`, `three.js`; meshopt не заявлен) — <https://github.com/kovacsv/Online3DViewer>
+
+Краткие тезисы: Draco и meshopt сжимают **геометрию** (10–20× и 5–10×), текстуры не трогают; квантование делает Draco **lossy** (для архитектуры 14 бит незаметно); zip поверх Draco почти ничего не добавляет; `.glb.zip` — про доставку, а не про формат.
 

@@ -147,7 +147,9 @@ namespace IvanTools
             sb.AppendLine("Мешей: " + scene.Meshes.Count.ToString());
             sb.AppendLine("Примитивов: " + scene.PrimitiveCount.ToString());
             sb.AppendLine("Треугольников: " + scene.TriangleCount.ToString());
-            sb.AppendLine("Материалов: " + scene.Materials.Count.ToString());
+            sb.AppendLine("Материалов: " + scene.Materials.Count.ToString() +
+                " (с текстурой: " + scene.MaterialsWithTexture.ToString() +
+                ", плоский цвет: " + scene.MaterialsFlatColor.ToString() + ")");
             sb.AppendLine("Текстур встроено: " + scene.Images.Count.ToString() +
                 " (не найдено: " + scene.TexturesMissing.ToString() + ")");
 
@@ -700,6 +702,7 @@ namespace IvanTools
             _defaultMaterial.DoubleSided = true;
             _defaultMaterial.ImageIndex = -1;
             _scene.Materials.Add(_defaultMaterial);
+            MaterialProbe.Begin();
         }
 
         public GlbMaterial DefaultMaterial
@@ -718,22 +721,36 @@ namespace IvanTools
             float alpha = (float)(1.0 - transparency);
             if (alpha < 0.02f) alpha = 0.02f;
 
+            Color nodeColor = null;
+            try { nodeColor = node.Color; }
+            catch { nodeColor = null; }
+
             bool isDefault = node.MaterialId == ElementId.InvalidElementId;
             string alphaKey = alpha.ToString("0.###", CultureInfo.InvariantCulture);
+
+            // Цвет входит в ключ кэша: один материал может быть переопределён в виде
+            // разными цветами на разных элементах (фильтры/переопределения V/G).
+            string colorKey = nodeColor == null
+                ? "nc"
+                : nodeColor.Red.ToString(CultureInfo.InvariantCulture) + "_" +
+                  nodeColor.Green.ToString(CultureInfo.InvariantCulture) + "_" +
+                  nodeColor.Blue.ToString(CultureInfo.InvariantCulture);
+
             string key = (isDefault
                 ? "default"
                 : (doc != null ? doc.GetHashCode().ToString(CultureInfo.InvariantCulture) : "0") +
-                  ":" + node.MaterialId.ToString()) + ":" + alphaKey;
+                  ":" + node.MaterialId.ToString()) + ":" + alphaKey + ":" + colorKey;
 
             GlbMaterial cached;
             if (_cache.TryGetValue(key, out cached))
                 return cached;
 
-            GlbMaterial material = Build(node, alpha);
+            GlbMaterial material = Build(node, doc, nodeColor, transparency, alpha);
             _cache[key] = material;
             return material;
         }
-        private GlbMaterial Build(MaterialNode node, float alpha)
+
+        private GlbMaterial Build(MaterialNode node, Document doc, Color nodeColor, double transparency, float alpha)
         {
             GlbMaterial m = new GlbMaterial();
             m.A = alpha;
@@ -743,15 +760,49 @@ namespace IvanTools
             m.Roughness = 0.5f;
             m.ImageIndex = -1;
 
-            Color color = null;
-            try { color = node.Color; }
-            catch { color = null; }
-
-            if (color != null)
+            // ---- Правило выбора цвета ------------------------------------------------
+            // Revit (Material.UseRenderAppearanceForShading):
+            //   true  -> закрашенный вид строится по render appearance (текстура);
+            //   false -> по цвету и прозрачности материала, текстура НЕ используется.
+            // Если брать текстуру всегда, «ярко-красный бетон» с выключенной отделкой
+            // становится серым (регрессия, замеченная на лестнице).
+            Material element = null;
+            try
             {
-                m.R = ConvertColor(color.Red / 255f);
-                m.G = ConvertColor(color.Green / 255f);
-                m.B = ConvertColor(color.Blue / 255f);
+                if (doc != null && node.MaterialId != ElementId.InvalidElementId)
+                    element = doc.GetElement(node.MaterialId) as Material;
+            }
+            catch
+            {
+                element = null;
+            }
+
+            bool useAppearance = true;
+            Color materialColor = null;
+            bool colorOverridden = false;
+            if (element != null)
+            {
+                try { useAppearance = element.UseRenderAppearanceForShading; }
+                catch { useAppearance = true; }
+                try { materialColor = element.Color; }
+                catch { materialColor = null; }
+                try
+                {
+                    colorOverridden = materialColor != null && nodeColor != null &&
+                                      !SameColor(materialColor, nodeColor);
+                }
+                catch
+                {
+                    colorOverridden = false;
+                }
+            }
+
+            Color flatColor = nodeColor != null ? nodeColor : materialColor;
+            if (flatColor != null)
+            {
+                m.R = ConvertColor(flatColor.Red / 255f);
+                m.G = ConvertColor(flatColor.Green / 255f);
+                m.B = ConvertColor(flatColor.Blue / 255f);
             }
             else
             {
@@ -759,7 +810,6 @@ namespace IvanTools
                 m.G = SrgbToLinear(0.72f);
                 m.B = SrgbToLinear(0.72f);
             }
-
             string title = null;
             Asset asset = null;
             try
@@ -771,6 +821,7 @@ namespace IvanTools
                 asset = null;
             }
 
+            TextureInfo info = null;
             if (asset != null)
             {
                 try { title = asset.Title; }
@@ -805,13 +856,17 @@ namespace IvanTools
                 {
                 }
 
-                // Текстура base color: текстура перекрывает цвет, фактор = белый
-                try
+                // Текстура — только если вид строится по отделке (см. правило выше)
+                if (useAppearance)
                 {
-                    TryApplyTexture(asset, m);
-                }
-                catch
-                {
+                    try
+                    {
+                        info = TryApplyTexture(asset, m);
+                    }
+                    catch
+                    {
+                        info = null;
+                    }
                 }
             }
 
@@ -824,13 +879,32 @@ namespace IvanTools
             string baseName = string.IsNullOrEmpty(title) ? "Material" : title;
             m.Name = ExportToGlbCommand.Sanitize(baseName + "_" + id);
 
+            bool hasTexture = info != null && info.Found && m.ImageIndex >= 0;
+            if (hasTexture) _scene.MaterialsWithTexture++;
+            else _scene.MaterialsFlatColor++;
+
+            MaterialProbe.Log(id + ";" + m.Name + ";" +
+                FormatColor(materialColor) + ";" + FormatColor(nodeColor) + ";" +
+                useAppearance.ToString() + ";" + colorOverridden.ToString() + ";" +
+                transparency.ToString("0.###", CultureInfo.InvariantCulture) + ";" +
+                node.HasOverriddenAppearance.ToString() + ";" + (asset != null).ToString() + ";" +
+                (info == null ? "-" : info.DiffuseKey) + ";" +
+                (info == null ? 0 : info.Candidates).ToString(CultureInfo.InvariantCulture) + ";" +
+                hasTexture.ToString() + ";" +
+                (!useAppearance ? "appearance-off" : (hasTexture ? "texture" : "color")) + ";" +
+                m.R.ToString("0.###", CultureInfo.InvariantCulture) + "," +
+                m.G.ToString("0.###", CultureInfo.InvariantCulture) + "," +
+                m.B.ToString("0.###", CultureInfo.InvariantCulture));
+
             _scene.Materials.Add(m);
             return m;
         }
-
-        // Текстура + её реальный масштаб/повтор из подключённого ассета UnifiedBitmap
-        private void TryApplyTexture(Asset rootAsset, GlbMaterial m)
+        // Текстура + её реальный масштаб/повтор и тинт из ассета UnifiedBitmap
+        private TextureInfo TryApplyTexture(Asset rootAsset, GlbMaterial m)
         {
+            TextureInfo info = new TextureInfo();
+            info.DiffuseKey = "-";
+
             for (int i = 0; i < DiffuseKeys.Length; i++)
             {
                 AssetProperty prop = null;
@@ -849,14 +923,39 @@ namespace IvanTools
                 if (candidates.Count == 0)
                     continue;
 
+                info.DiffuseKey = DiffuseKeys[i];
+                info.Candidates = candidates.Count;
+
                 int imageIndex = GetImageIndex(candidates);
                 if (imageIndex < 0)
                     continue;
 
                 m.ImageIndex = imageIndex;
-                m.R = 1f;
-                m.G = 1f;
-                m.B = 1f;
+                info.Found = true;
+
+                // Тинт текстуры: в Revit цвет умножается на картинку,
+                // без этого «красный бетон» становится серым.
+                info.TintEnabled = ReadBool(connected, "common_tint_toggle", false) ||
+                                   ReadBool(rootAsset, "common_tint_toggle", false);
+                if (info.TintEnabled)
+                {
+                    info.Tint = ReadColor(connected, "common_tint_color");
+                    if (info.Tint == null)
+                        info.Tint = ReadColor(rootAsset, "common_tint_color");
+                }
+
+                if (info.Tint != null)
+                {
+                    m.R = ConvertColor(info.Tint.Red / 255f);
+                    m.G = ConvertColor(info.Tint.Green / 255f);
+                    m.B = ConvertColor(info.Tint.Blue / 255f);
+                }
+                else
+                {
+                    m.R = 1f;
+                    m.G = 1f;
+                    m.B = 1f;
+                }
 
                 // Revit отдаёт UV в футах, поэтому тайл = RealWorldScale (футы)
                 float scaleU = ReadDistance(connected, KeyScaleU, 1f);
@@ -865,8 +964,10 @@ namespace IvanTools
                 float repeatV = ReadNumber(connected, KeyRepeatV, 1f);
                 m.UvMulU = repeatU / scaleU;
                 m.UvMulV = repeatV / scaleV;
-                return;
+                return info;
             }
+
+            return info;
         }
 
         // В AssetPropertyString Revit хранит несколько вариантов пути через '|'
@@ -944,6 +1045,51 @@ namespace IvanTools
             }
 
             return fallback;
+        }
+
+        private static bool ReadBool(Asset asset, string key, bool fallback)
+        {
+            try
+            {
+                AssetPropertyBoolean flag = asset.FindByName(key) as AssetPropertyBoolean;
+                if (flag != null)
+                    return flag.Value;
+            }
+            catch
+            {
+            }
+
+            return fallback;
+        }
+
+        // common_tint_color — AssetPropertyDoubleArray4d (RGBA)
+        private static Color ReadColor(Asset asset, string key)
+        {
+            try
+            {
+                AssetPropertyDoubleArray4d array = asset.FindByName(key) as AssetPropertyDoubleArray4d;
+                if (array != null)
+                    return array.GetValueAsColor();
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        private static bool SameColor(Color a, Color b)
+        {
+            return a.Red == b.Red && a.Green == b.Green && a.Blue == b.Blue;
+        }
+
+        private static string FormatColor(Color color)
+        {
+            if (color == null)
+                return "-";
+            return color.Red.ToString(CultureInfo.InvariantCulture) + "," +
+                   color.Green.ToString(CultureInfo.InvariantCulture) + "," +
+                   color.Blue.ToString(CultureInfo.InvariantCulture);
         }
 
         private static float ConvertColor(float sRGB)
@@ -1168,6 +1314,8 @@ namespace IvanTools
         public int ElementsWithoutGeometry;
         public int TriangleCount;
         public int TexturesMissing;
+        public int MaterialsWithTexture;
+        public int MaterialsFlatColor;
         public DateTime StartTime;
         public DateTime EndTime;
 
@@ -1260,6 +1408,52 @@ namespace IvanTools
     {
         public byte[] Data;
         public string MimeType = "image/png";
+    }
+
+    // Результат поиска текстуры для материала (правило цвета + диагностика)
+    internal sealed class TextureInfo
+    {
+        public string DiffuseKey = "-";
+        public int Candidates;
+        public bool Found;
+        public bool TintEnabled;
+        public Color Tint;
+    }
+
+    // Диагностика материалов: %TEMP%\ExportToGlb_materials.log
+    internal static class MaterialProbe
+    {
+        private static string _path;
+
+        internal static void Begin()
+        {
+            try
+            {
+                _path = Path.Combine(Path.GetTempPath(), "ExportToGlb_materials.log");
+                File.WriteAllText(_path,
+                    "ExportToGlb: материалы (id; имя; Material.Color; node.Color; UseRenderAppearance; " +
+                    "colorOverridden; transparency; HasOverriddenAppearance; asset; diffuseKey; candidates; " +
+                    "texture; decision; linearRGB)" + Environment.NewLine);
+            }
+            catch
+            {
+                _path = null;
+            }
+        }
+
+        internal static void Log(string line)
+        {
+            if (_path == null)
+                return;
+            try
+            {
+                File.AppendAllText(_path, line + Environment.NewLine);
+            }
+            catch
+            {
+                _path = null;
+            }
+        }
     }
 
     // =========================================================================
