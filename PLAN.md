@@ -311,3 +311,27 @@ csc /nologo /warn:4 /target:library /out:"$env:TEMP\ExportToGlb_check.dll" `
 | `CsHotLoader` | компилирует через `CSharpCodeProvider` (C# 5), ссылается только на `RevitAPI`/`RevitAPIUI` + уже загруженные сборки → внешние DLL недоступны |
 | Сборка на машине | нет .NET SDK, нет targeting pack 4.8, нет `netstandard.dll`-фасада → только `csc` v4.0.30319 (C# 5) по `RevitAPI.dll` |
 | `%ProgramFiles(x86)%\Common Files\Autodesk Shared\Materials\Textures` | существует (оттуда резолвятся пути текстур) |
+
+---
+
+## 16. Статус реализации
+
+Сделано (файл `ExportToGlb.cs`, ~1600 строк, один класс `IExternalCommand`):
+
+* `ExportToGlbCommand` — проверка `View3D`/`IsTemplate`, `SaveFileDialog`, `CustomExporter` (`IncludeGeometricObjects = false`, `ShouldStopOnError = false`), сводка в `TaskDialog`, отказ при нулевом числе треугольников («Каркас»).
+* `GlbExportContext` — стек трансформаций (`InstanceNode`/`LinkNode` через `GroupNode.GetTransform()`), документы связей (`LinkNode.GetDocument()`), нода-группа на связь, один меш на элемент, один примитив на материал, дедупликация вершин внутри полимеша, отбрасывание вырожденных треугольников, UV c `V' = -V`, защита от исключений в каждом колбэке.
+* `MaterialLibrary` — `node.Color`, `GetAppearance()`/`GetAppearanceOverride()`, `generic_glossiness` → roughness, `metal_color`/`generic_is_metal` → metallic, диффузные ключи ассетов перебором, текстуры (png/jpeg как есть, остальное → PNG через `System.Drawing`), резолв путей в библиотеке Autodesk, кэш картинок и материалов.
+* `GlbWriter` — GLB-контейнер (JSON + BIN, паддинги), `POSITION` c `min/max`, `uint32`-индексы, `bufferView.target`, `InvariantCulture` для чисел, JSON-экранирование, встраивание картинок в BIN.
+* `UvProbe` — Этап 0: лог `%TEMP%\ExportToGlb_uv.log` (первые 30 полимешей: min/max UV и габарит полимеша).
+
+Проверено:
+
+* `csc /warn:4`: **0 ошибок, 0 предупреждений**.
+* Дымовой тест писателя (сцена из двух мешей, 3 материалов, 1 текстуры): контейнер корректен (magic, version 2, длины чанков), JSON парсится, `nodes/meshes/materials/textures/images/samplers/accessors/bufferViews` на месте, `POSITION.min/max` верны, все `bufferViews` внутри BIN, матрица `BasisTransform` = `Scale(0.3048)·RotX(-90°)`.
+* Развёрнуто: `C:\ProgramData\Autodesk\Revit\Addins\2023\IvanTools\ExportToGlb.dll|.cs|.png`, блок `<AddIn>` добавлен в `IvanTools.addin` (XML валиден, 4 аддина; резервная копия манифеста — `IvanTools.addin.bak`).
+
+Осталось (требует Revit + Blender):
+
+* Этап 0 на реальной модели: посмотреть `ExportToGlb_uv.log` и зафиксировать решение по `RealWorldScale` (§8).
+* Этап 5: проверка габаритов/осей/Section Box/материалов в Blender, время экспорта на большом проекте.
+
