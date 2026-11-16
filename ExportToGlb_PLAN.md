@@ -51,7 +51,7 @@ UI — минимальный: проверка активного вида → 
 
 | Тип | Назначение |
 |---|---|
-| `IvanTools.ExportToGlbCommand` | `IExternalCommand`: проверка вида, `SaveFileDialog`, запуск экспорта, сводка |
+| `IvanTools.ExportToGlb` | `IExternalCommand`: проверка вида, `SaveFileDialog`, запуск экспорта, сводка |
 | `IvanTools.GlbExportContext` | `IExportContext`: стек трансформаций, треугольники, переключение материалов |
 | `IvanTools.MaterialLibrary` | кэш `ElementId -> GlbMaterial`, список предупреждений о текстурах |
 | `IvanTools.GlbImageCache` | кэш картинок `(путь, ширина/высота) -> индекс`, конвертация в PNG |
@@ -65,7 +65,7 @@ UI — минимальный: проверка активного вида → 
 
 ---
 
-## 4. Поток выполнения (`ExportToGlbCommand`)
+## 4. Поток выполнения (`ExportToGlb`)
 
 1. `UIDocument uidoc = commandData.Application.ActiveUIDocument`; `Document doc = uidoc.Document`.
 2. `View3D view3d = uidoc.ActiveView as View3D`; если `null` **или** `view3d.IsTemplate` → `TaskDialog` с предупреждением и `Result.Cancelled`.
@@ -249,7 +249,7 @@ buffers    [ { byteLength } ]
 ## 11. Порядок реализации (этапы)
 
 * **Этап 0.** Проба данных на реальной модели: лог UV/нормалей/числа точек, размеры полимешей; проверить фактические ключи ассетов (`generic_diffuse`, `unifiedbitmap_Bitmap`). Результат — зафиксированные решения по §8 и §7.2.
-* **Этап 1.** Каркас: `Command` + `GlbExportContext` + `GlbWriter`, материалы только цветом (`baseColorFactor`), без текстур. Проверка в Blender: масштаб (габарит = Revit × 0.3048), ориентация (Y-up), Section Box, порядок обхода (нет «дыр» и вывернутых граней).
+* **Этап 1.** Каркас: `ExportToGlb` + `GlbExportContext` + `GlbWriter`, материалы только цветом (`baseColorFactor`), без текстур. Проверка в Blender: масштаб (габарит = Revit × 0.3048), ориентация (Y-up), Section Box, порядок обхода (нет «дыр» и вывернутых граней).
 * **Этап 2.** Материалы: прозрачность, roughness/metallic, включение UV по результатам Этапа 0.
 * **Этап 3.** Текстуры: извлечение, резолв путей, конвертация в PNG, кэш, отчёт о ненайденных.
 * **Этап 4.** Иерархия и связи (`LinkNode` → ноды элементов), имена, устойчивость к ошибкам, отмена.
@@ -282,7 +282,7 @@ csc /nologo /warn:4 /target:library /out:"$env:TEMP\ExportToGlb_check.dll" `
   <!-- Экспорт активного 3D-вида в GLB -->
   <AddIn Type="Command">
     <Name>Export To GLB</Name>
-    <FullClassName>IvanTools.ExportToGlbCommand</FullClassName>
+    <FullClassName>IvanTools.ExportToGlb</FullClassName>
     <Assembly>.\IvanTools\ExportToGlb.dll</Assembly>
     <AddInId>8F2A6C41-3D7B-4E62-9A15-6B0C7E4D2F58</AddInId>
     <VendorId>RODIONOV</VendorId>
@@ -344,7 +344,7 @@ csc /nologo /warn:4 /target:library /out:"$env:TEMP\ExportToGlb_check.dll" `
 
 Реализовано (файл `ExportToGlb.cs`, один публичный `IExternalCommand`, без внешних DLL):
 
-* `ExportToGlbCommand` — проверка `View3D`/`IsTemplate`, `SaveFileDialog`, `CustomExporter` (`IncludeGeometricObjects = false`, `ShouldStopOnError = false`), отказ при нуле треугольников («Каркас»), сводка: размер файла, время, элементы (в т.ч. без геометрии), меши, примитивы, треугольники, материалы, текстуры «встроено / не найдено», первые 10 предупреждений.
+* `ExportToGlb` — проверка `View3D`/`IsTemplate`, `SaveFileDialog`, `CustomExporter` (`IncludeGeometricObjects = false`, `ShouldStopOnError = false`), отказ при нуле треугольников («Каркас»), сводка: размер файла, время, элементы (в т.ч. без геометрии), меши, примитивы, треугольники, материалы, текстуры «встроено / не найдено», первые 10 предупреждений.
 * `GlbExportContext` — стек трансформаций (`GroupNode.GetTransform()`), документы связей (`LinkNode.GetDocument()`), нода-группа на связь, меш на элемент, примитив на материал, дедупликация вершин внутри полимеша, отбрасывание вырожденных треугольников, UV по формуле §8, локальный `try/catch` в каждом колбэке.
 * `MaterialLibrary` — `node.Color` с конвертацией **sRGB → linear**, `GetAppearance()`/`GetAppearanceOverride()`, `generic_glossiness` → roughness, `metal_color`/`generic_is_metal` → metallic, текстуры: разбор `|`-списка путей, нормализация смешанных слешей, индекс библиотеки текстур по имени файла (один обход на экспорт), png/jpeg как есть, остальное → PNG через `System.Drawing`, `RealWorldScale`/`Repeat` → множители UV, кэши.
 * `GlbWriter` — GLB-контейнер с паддингами, `POSITION` c `min/max`, **`uint16`-индексы** при `< 65536` вершин (с выравниванием BIN после нечётных длин), `bufferView.target`, `InvariantCulture`, JSON-экранирование, картинки в BIN.

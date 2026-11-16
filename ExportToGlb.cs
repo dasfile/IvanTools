@@ -54,7 +54,7 @@ namespace IvanTools
 {
     [Transaction(TransactionMode.Manual)]
     [Regeneration(RegenerationOption.Manual)]
-    public class ExportToGlbCommand : IExternalCommand
+    public class ExportToGlb : IExternalCommand
     {
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
@@ -360,7 +360,7 @@ namespace IvanTools
                 // имя — не повод прерывать экспорт
             }
 
-            return ExportToGlbCommand.Sanitize(category + "_" + name + "_" + id.ToString());
+            return ExportToGlb.Sanitize(category + "_" + name + "_" + id.ToString());
         }
         // ---------------------------------------------------------------------
         // Вхождения (трансформации) и связи
@@ -408,7 +408,7 @@ namespace IvanTools
                 {
                 }
 
-                GlbNode linkNode = new GlbNode("Link_" + ExportToGlbCommand.Sanitize(linkName));
+                GlbNode linkNode = new GlbNode("Link_" + ExportToGlb.Sanitize(linkName));
                 CurrentParent.Children.Add(linkNode);
                 _nodePath.Add(linkNode);
             }
@@ -877,7 +877,7 @@ namespace IvanTools
                 ? "Default"
                 : node.MaterialId.ToString();
             string baseName = string.IsNullOrEmpty(title) ? "Material" : title;
-            m.Name = ExportToGlbCommand.Sanitize(baseName + "_" + id);
+            m.Name = ExportToGlb.Sanitize(baseName + "_" + id);
 
             bool hasTexture = info != null && info.Found && m.ImageIndex >= 0;
             if (hasTexture) _scene.MaterialsWithTexture++;

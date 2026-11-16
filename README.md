@@ -6,9 +6,9 @@
 
 | Плагин | Файл | Класс | AddInId | Статус |
 |---|---|---|---|---|
-| Adjust To Face | `AdjustToFace.cs` | `IvanTools.AdjustToFaceCommand` | `aace0286-f1f7-4df6-bdf7-2cfca2a4b4ed` | готово, `AdjustToFace_PLAN.md` |
-| Export To GLB | `ExportToGlb.cs` | `IvanTools.ExportToGlbCommand` | `8F2A6C41-3D7B-4E62-9A15-6B0C7E4D2F58` | готово, `ExportToGlb_PLAN.md` |
-| Export To IFC | `ExportToIfc.cs` | `IvanTools.ExportToIfcCommand` | `3B7E5D92-6C1A-4F08-9E24-5A1D2C8B7F63` | в работе, `PLAN.md` |
+| Adjust To Face | `AdjustToFace.cs` | `IvanTools.AdjustToFace` | `aace0286-f1f7-4df6-bdf7-2cfca2a4b4ed` | готово, `AdjustToFace_PLAN.md` |
+| Export To GLB | `ExportToGlb.cs` | `IvanTools.ExportToGlb` | `8F2A6C41-3D7B-4E62-9A15-6B0C7E4D2F58` | готово, `ExportToGlb_PLAN.md` |
+| Export To IFC | `ExportToIfc.cs` | `IvanTools.ExportToIfc` | `3B7E5D92-6C1A-4F08-9E24-5A1D2C8B7F63` | в работе, `PLAN.md` |
 | Batch Sheets Renumber | `SheetsBatchRenum.cs` | `RenumberCommand` | `50280453-0000-4e32-88e2-48c4ad6e4e3b` | ранний, в репозитории только код вне этого каталога |
 | Split Wall | `SplitWall.cs` | `SplitWallToLayers` | `A1B2C3D4-E5F6-4321-8765-AABBCCDDEEFF` | ранний |
 

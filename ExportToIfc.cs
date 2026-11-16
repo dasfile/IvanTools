@@ -48,7 +48,7 @@ namespace IvanTools
 {
     [Transaction(TransactionMode.Manual)]
     [Regeneration(RegenerationOption.Manual)]
-    public class ExportToIfcCommand : IExternalCommand
+    public class ExportToIfc : IExternalCommand
     {
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
@@ -113,42 +113,57 @@ namespace IvanTools
             IfcExportLog.Begin(settings, view3d, targetPath);
 
             bool ok;
-            try
+            // Экспортёр IFC пишет в документ (IFC GUID, служебные параметры), поэтому
+            // Document.Export для IFC требует открытой транзакции. Commit, а не RollBack:
+            // IFC GUID сохраняются в модели и остаются стабильными между экспортами.
+            using (Transaction transaction = new Transaction(doc, "Экспорт IFC"))
             {
-                using (IFCExportOptions options = new IFCExportOptions())
+                try
                 {
-                    options.FileVersion = settings.Version;
-                    // "что видно на виде": содержимое определяют настройки видимости вида
-                    options.FilterViewId = view3d.Id;
-                    options.ExportBaseQuantities = settings.BaseQuantities;
-                    options.WallAndColumnSplitting = settings.SplitWallsByLevel;
-                    if (!string.IsNullOrEmpty(settings.MappingFile))
-                        options.FamilyMappingFile = settings.MappingFile;
+                    transaction.Start();
 
-                    // Ключи, которых нет в диалоге, уходят в движок как есть.
-                    // Незнакомый ключ не должен ломать экспорт: фиксируем и идём дальше.
-                    foreach (KeyValuePair<string, string> extra in settings.ExtraOptions)
+                    using (IFCExportOptions options = new IFCExportOptions())
                     {
-                        try
+                        options.FileVersion = settings.Version;
+                        // "что видно на виде": содержимое определяют настройки видимости вида
+                        options.FilterViewId = view3d.Id;
+                        options.ExportBaseQuantities = settings.BaseQuantities;
+                        options.WallAndColumnSplitting = settings.SplitWallsByLevel;
+                        if (!string.IsNullOrEmpty(settings.MappingFile))
+                            options.FamilyMappingFile = settings.MappingFile;
+
+                        // Ключи, которых нет в диалоге, уходят в движок как есть.
+                        // Незнакомый ключ не должен ломать экспорт: фиксируем и идём дальше.
+                        foreach (KeyValuePair<string, string> extra in settings.ExtraOptions)
                         {
-                            options.AddOption(extra.Key, extra.Value);
+                            try
+                            {
+                                options.AddOption(extra.Key, extra.Value);
+                            }
+                            catch (Exception ex)
+                            {
+                                settings.AddOptionFailures.Add(extra.Key + " = " + extra.Value + " (" + ex.Message + ")");
+                            }
                         }
-                        catch (Exception ex)
-                        {
-                            settings.AddOptionFailures.Add(extra.Key + " = " + extra.Value + " (" + ex.Message + ")");
-                        }
+
+                        ok = doc.Export(folder, baseName, options);
                     }
 
-                    ok = doc.Export(folder, baseName, options);
+                    transaction.Commit();
                 }
-            }
-            catch (Exception ex)
-            {
-                message = ex.Message;
-                IfcExportLog.Write("ОШИБКА: " + ex);
-                TaskDialog.Show("IvanTools — Export To IFC",
-                    "Экспорт прерван ошибкой:\n\n" + ex.ToString());
-                return Result.Failed;
+                catch (Exception ex)
+                {
+                    if (transaction.GetStatus() == TransactionStatus.Started)
+                        transaction.RollBack();
+
+                    message = ex.Message;
+                    IfcExportLog.Write("ОШИБКА: " + ex);
+                    TaskDialog.Show("IvanTools — Export To IFC",
+                        "Экспорт прерван ошибкой:\n\n" + ex.Message +
+                        "\n\nПодробности (стек вызова) — в логе:\n" +
+                        Path.Combine(Path.GetTempPath(), "ExportToIfc.log"));
+                    return Result.Failed;
+                }
             }
 
             string actualPath = FindExportedFile(folder, baseName);

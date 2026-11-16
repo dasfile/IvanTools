@@ -90,7 +90,7 @@ loop (до 3 попыток):
 
 | Тип | Назначение |
 |---|---|
-| `IvanTools.AdjustToFaceCommand` | единственный `IExternalCommand` (важно для CsHotLoader — он запускает первый найденный) |
+| `IvanTools.AdjustToFace` | единственный `IExternalCommand` (важно для CsHotLoader — он запускает первый найденный) |
 | `IvanTools.VertexTarget` | исходное положение вершины + целевая отметка (замена кортежу) |
 | `IvanTools.SlabHostSelectionFilter` | разрешает кликать только `Floor`/`RoofBase` |
 | `IvanTools.TargetFaceSelectionFilter` | запрещает выбирать грань самого хост-элемента |
@@ -117,7 +117,7 @@ C:\ProgramData\Autodesk\Revit\Addins\2023\
   <!-- Выравнивание вершин формы перекрытия по грани -->
   <AddIn Type="Command">
     <Name>Adjust To Face</Name>
-    <FullClassName>IvanTools.AdjustToFaceCommand</FullClassName>
+    <FullClassName>IvanTools.AdjustToFace</FullClassName>
     <Assembly>.\IvanTools\AdjustToFace.dll</Assembly>
     <AddInId>7E3C1A90-2B44-4F17-9C6B-5D0A11B2C3D4</AddInId>
     <VendorId>RODIONOV</VendorId>

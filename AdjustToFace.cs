@@ -51,7 +51,7 @@ namespace IvanTools
 {
     [Transaction(TransactionMode.Manual)]
     [Regeneration(RegenerationOption.Manual)]
-    public class AdjustToFaceCommand : IExternalCommand
+    public class AdjustToFace : IExternalCommand
     {
         // Нормаль считается «вертикальной» (грань вертикальна) ниже этого порога
         private const double NormalEpsilon = 1e-6;

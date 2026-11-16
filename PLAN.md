@@ -40,6 +40,8 @@ IFC рассматривается как **«запекание»** модел�
 | `IFCExportOptions.WallAndColumnSplitting` | «Option to allow division of multi-level walls and columns by levels» (по умолчанию `false`) |
 | `IFCExportOptions.FamilyMappingFile` | путь к таблице маппинга семейств; пустая строка = текущая таблица Revit |
 | `IFCExportOptions.AddOption(key, value)` | доступ к недокументированным опциям (tessellation, property sets и т.п.) — **ключи проверять экспериментом** |
+| `Document.Export` (IFC) | **требует открытой транзакции**: экспортёр пишет в документ (IFC GUID, служебные параметры). Без `Transaction` падает с `Autodesk.Revit.Exceptions.ModificationOutsideTransaction` («Modifying is forbidden because the document has no open transaction») |
+| Имя команды в UI | Revit и `CsHotLoader` показывают **полное имя класса** (`IvanTools.ExportToIfc`); суффикс `Command` в имени класса — лишний, поэтому классы называются без него |
 | Файлы Revit на диске | `Revit.IFC.Export.dll`, `IntfIFC.dll`, `IFCCertifiedEntitiesAndPSets.json`, конфиги `IFC4_22.12_16.txexp` / `IFC2X3_22.12_16.txexp`, XSD `IFC4.xsd`, `IFC2X3_TC1.xsd` |
 | `RevitAPIIFC.dll` | низкоуровневый API (`IFCFile`, `ExporterIFC`) существует, но **не используется**: обёртка над `Export` дешевле и совместимее |
 
@@ -110,7 +112,7 @@ IFC рассматривается как **«запекание»** модел�
 
 | Тип | Назначение |
 |---|---|
-| `ExportToIfcCommand` | `IExternalCommand`: проверки, диалог, `SaveFileDialog`, вызов экспорта, отчёт |
+| `ExportToIfc` | `IExternalCommand`: проверки, диалог, `SaveFileDialog`, вызов экспорта, отчёт |
 | `IfcExportPreset` | имя, описание, `IFCVersion`, дефолты QTO/Split |
 | `IfcExportSettings` | выбранные настройки (пресет, флаги, путь маппинга) + конфиг: `SaveToFile`, `ConfigInfo/ConfigStatus`, `ConfigErrors`, `ExtraOptions` (AddOption), `AddOptionFailures` |
 | `IfcConfigFile` | чтение/запись `IvanTools.ini` (§12): поиск, парсер, merge-запись |
@@ -121,24 +123,30 @@ IFC рассматривается как **«запекание»** модел�
 Ядро экспорта:
 
 ```csharp
-using (IFCExportOptions options = new IFCExportOptions())
+// IFC-экспорт пишет в документ (IFC GUID) -> нужна открытая транзакция
+using (Transaction transaction = new Transaction(doc, "Экспорт IFC"))
 {
-    options.FileVersion = settings.Preset.Version;
-    options.FilterViewId = view3d.Id;
-    options.ExportBaseQuantities = settings.BaseQuantities;
-    options.WallAndColumnSplitting = settings.SplitWallsByLevel;
-    if (!string.IsNullOrEmpty(settings.MappingFile))
-        options.FamilyMappingFile = settings.MappingFile;
+    transaction.Start();
+    using (IFCExportOptions options = new IFCExportOptions())
+    {
+        options.FileVersion = settings.Preset.Version;
+        options.FilterViewId = view3d.Id;
+        options.ExportBaseQuantities = settings.BaseQuantities;
+        options.WallAndColumnSplitting = settings.SplitWallsByLevel;
+        if (!string.IsNullOrEmpty(settings.MappingFile))
+            options.FamilyMappingFile = settings.MappingFile;
 
-    // ключи из конфига, которых нет в диалоге: по одному, с локальным try/catch
-    foreach (KeyValuePair<string, string> extra in settings.ExtraOptions)
-        options.AddOption(extra.Key, extra.Value);
+        // ключи из конфига, которых нет в диалоге: по одному, с локальным try/catch
+        foreach (KeyValuePair<string, string> extra in settings.ExtraOptions)
+            options.AddOption(extra.Key, extra.Value);
 
-    ok = doc.Export(folder, baseName, options);   // имя без расширения
+        ok = doc.Export(folder, baseName, options);   // имя без расширения
+    }
+    transaction.Commit();
 }
 ```
 
-Свойства задаются **до** `AddOption`; ошибка `AddOption` не прерывает экспорт — пара попадает в `AddOptionFailures` и в предупреждения отчёта.
+Свойства задаются **до** `AddOption`; ошибка `AddOption` не прерывает экспорт — пара попадает в `AddOptionFailures` и в предупреждения отчёта. При исключении транзакция откатывается (`RollBack`), пользователю показывается `ex.Message` и путь к логу, полный стек — только в лог.
 
 После экспорта — поиск фактического файла (`{baseName}.ifc`, `{baseName}.IFC`, `{baseName}`), проверка `ok`, размера и содержимого.
 
@@ -193,7 +201,7 @@ AddOption: 2 (store_ifc_guid=true, tesselation_lod=Medium)
 
 ## 9. Этапы реализации
 
-* **Этап 1 (каркас).** `ExportToIfcCommand` + `IfcExportDialog` + `IfcExportPreset/Settings`; экспорт через `doc.Export` с `FilterViewId`; поиск фактического файла; минимальный отчёт (размер, время, схема, всего сущностей); лог. Проверка: файл создаётся, три пресета дают три разных результата, ничего не падает на несохранённом документе.
+* **Этап 1 (каркас).** `ExportToIfc` + `IfcExportDialog` + `IfcExportPreset/Settings`; экспорт через `doc.Export` с `FilterViewId`; поиск фактического файла; минимальный отчёт (размер, время, схема, всего сущностей); лог. Проверка: файл создаётся, три пресета дают три разных результата, ничего не падает на несохранённом документе.
 * **Этап 2 (диагностика).** `IfcStepSummary`: счётчики по типам, стили, PSets/QTO, проверки и предупреждения; полный отчёт в стиле GLB-плагина. Проверка: отчёт совпадает с ручным подсчётом по файлу (grep).
 * **Этап 3 (конфиг и доводка).** `IfcConfigFile` (§12): поиск, парсер, merge-запись; кнопки «Загрузить…»/«Сохранить как…» и галочка «Сохранять настройки в файл проекта»; относительные пути от папки ini; проверенные в Этапе 0 ключи `AddOption` вносятся в таблицу §12. Проверка: три сценария конфига (нет файла, файл рядом с `.rvt`, файл в `%APPDATA%`), правка ini руками не ломает экспорт, запись сохраняет комментарии и чужие ключи.
 * **Этап 4 (по желанию).** Батч по нескольким 3D-видам; IFCZIP; экспорт нескольких пресетов за один запуск.
@@ -219,7 +227,7 @@ C:\ProgramData\Autodesk\Revit\Addins\2023\IvanTools\
 IvanTools.addin            (блок <AddIn>, новый уникальный AddInId)
 ```
 
-Класс: `IvanTools.ExportToIfcCommand`. После правки манифеста нужен перезапуск Revit; через HotLoader — без перезапуска.
+Класс: `IvanTools.ExportToIfc`. После правки манифеста нужен перезапуск Revit; через HotLoader — без перезапуска.
 
 ---
 
