@@ -79,7 +79,7 @@ namespace IvanTools
 
             IfcExportSettings settings;
             IfcExportPreset[] presets = IfcExportPreset.CreateAll();
-            using (IfcExportDialog dialog = new IfcExportDialog(presets, 0, config))
+            using (IfcExportDialog dialog = new IfcExportDialog(presets, 1, config))
             {
                 if (dialog.ShowDialog() != DialogResult.OK || dialog.Settings == null)
                     return Result.Cancelled;
@@ -114,7 +114,7 @@ namespace IvanTools
 
             IfcExportLog.Begin(settings, view3d, targetPath);
 
-            bool ok;
+            bool ok = false;
             if (settings.DebugKeys)
             {
                 settings.DebugKeysReport = ProbeKeys();
@@ -125,67 +125,67 @@ namespace IvanTools
             // Экспортёр IFC пишет в документ (IFC GUID, служебные параметры), поэтому
             // Document.Export для IFC требует открытой транзакции. Commit, а не RollBack:
             // IFC GUID сохраняются в модели и остаются стабильными между экспортами.
-            using (Transaction transaction = new Transaction(doc, "Экспорт IFC"))
+            // no_transaction = true отключает обёртку — только для диагностики.
+            bool failed = false;
+            if (settings.NoTransaction)
             {
-                // Предупреждения экспортёра (например «элемент без IFC-класса») не должны
-                // останавливать прогон модальным окном; ошибки остаются как есть.
-                FailureHandlingOptions failureOptions = transaction.GetFailureHandlingOptions();
-                failureOptions.SetFailuresPreprocessor(new IfcWarningsSilencer());
-                failureOptions.SetClearAfterRollback(true);
-                transaction.SetFailureHandlingOptions(failureOptions);
-
+                IfcExportLog.Write("Диагностика: экспорт БЕЗ транзакции (no_transaction = true)");
                 try
                 {
-                    transaction.Start();
-
-                    using (IFCExportOptions options = new IFCExportOptions())
-                    {
-                        options.FileVersion = settings.Version;
-                        // "что видно на виде": содержимое определяют настройки видимости вида
-                        options.FilterViewId = view3d.Id;
-                        options.ExportBaseQuantities = settings.BaseQuantities;
-                        options.WallAndColumnSplitting = settings.SplitWallsByLevel;
-                        options.SpaceBoundaryLevel = settings.SpaceBoundaryLevel;
-                        if (!string.IsNullOrEmpty(settings.MappingFile))
-                            options.FamilyMappingFile = settings.MappingFile;
-
-                        ApplyOptions(options, settings);
-
-                        // Ключи, которых нет в диалоге, уходят в движок как есть:
-                        // незнакомый ключ не должен ломать экспорт.
-                        foreach (KeyValuePair<string, string> extra in settings.ExtraOptions)
-                            AddOption(options, extra.Key, extra.Value, settings);
-
-                        ok = doc.Export(folder, baseName, options);
-                    }
-
-                    transaction.Commit();
+                    ok = ExportCore(doc, folder, baseName, view3d, settings);
                 }
                 catch (Exception ex)
                 {
-                    if (transaction.GetStatus() == TransactionStatus.Started)
-                        transaction.RollBack();
+                    failed = true;
+                    ReportExportError(ex, ref message);
+                }
+            }
+            else
+            {
+                using (Transaction transaction = new Transaction(doc, "Экспорт IFC"))
+                {
+                    // Предупреждения экспортёра (например «элемент без IFC-класса») не должны
+                    // останавливать прогон модальным окном; ошибки остаются как есть.
+                    FailureHandlingOptions failureOptions = transaction.GetFailureHandlingOptions();
+                    failureOptions.SetFailuresPreprocessor(new IfcWarningsSilencer());
+                    failureOptions.SetClearAfterRollback(true);
+                    transaction.SetFailureHandlingOptions(failureOptions);
 
-                    message = ex.Message;
-                    IfcExportLog.Write("ОШИБКА: " + ex);
-                    TaskDialog.Show("IvanTools — Export To IFC",
-                        "Экспорт прерван ошибкой:\n\n" + ex.Message +
-                        "\n\nПодробности (стек вызова) — в логе:\n" +
-                        Path.Combine(Path.GetTempPath(), "ExportToIfc.log"));
-                    return Result.Failed;
+                    try
+                    {
+                        transaction.Start();
+                        ok = ExportCore(doc, folder, baseName, view3d, settings);
+                        transaction.Commit();
+                    }
+                    catch (Exception ex)
+                    {
+                        if (transaction.GetStatus() == TransactionStatus.Started)
+                            transaction.RollBack();
+
+                        failed = true;
+                        ReportExportError(ex, ref message);
+                    }
                 }
             }
 
+            if (failed)
+                return Result.Failed;
+
             string actualPath = FindExportedFile(folder, baseName);
             double seconds = (DateTime.Now - started).TotalSeconds;
+            IfcExportLog.Write("doc.Export -> " + ok.ToString() +
+                "; .ifc в папке: " + CountIfcFiles(folder).ToString());
 
             if (actualPath == null)
             {
-                IfcExportLog.Write("ОШИБКА: файл не найден после экспорта");
-                TaskDialog.Show("IvanTools — Export To IFC",
-                    "Revit сообщил результат: " + ok.ToString() + ",\n" +
-                    "но файл не найден в папке:\n" + folder + "\n\n" +
-                    "Проверьте права на запись.");
+                IfcExportLog.Write("ОШИБКА: файл не найден после экспорта (doc.Export=" + ok.ToString() + ")");
+                string text = ok
+                    ? "Revit вернул успех, но файл не создан.\n\nПапка:\n" + folder +
+                      "\n\nОбычно это внутренний сбой IFC-экспортёра (Revit показывает своё окно). " +
+                      "Попробуйте пресет IFC4 RV или отключите часть опций через skip_options в IvanTools.ini."
+                    : "Revit вернул false, файл не создан.\n\nПапка:\n" + folder +
+                      "\n\nПроверьте права на запись и свободное место.";
+                TaskDialog.Show("IvanTools — Export To IFC", text);
                 return Result.Failed;
             }
 
@@ -263,6 +263,8 @@ namespace IvanTools
         {
             if (string.IsNullOrEmpty(value))
                 return;         // «(не задано)», пустые фаза и расписания
+            if (IsSkipped(settings, key))
+                return;         // skip_options в .ini: диагностическое отключение ключа
             try
             {
                 options.AddOption(key, value);
@@ -272,6 +274,62 @@ namespace IvanTools
             {
                 settings.AddOptionFailures.Add(key + "=" + value + " (" + ex.Message + ")");
             }
+        }
+
+        private static bool IsSkipped(IfcExportSettings settings, string key)
+        {
+            if (string.IsNullOrEmpty(settings.SkipOptions))
+                return false;
+            string[] parts = settings.SkipOptions.Split(new char[] { ';', ',' },
+                StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < parts.Length; i++)
+            {
+                if (parts[i].Trim().Equals(key, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        // Сборка опций и сам экспорт (используется с транзакцией и без неё)
+        private static bool ExportCore(Document doc, string folder, string baseName,
+            View3D view3d, IfcExportSettings settings)
+        {
+            using (IFCExportOptions options = new IFCExportOptions())
+            {
+                options.FileVersion = settings.Version;
+                // "что видно на виде": содержимое определяют настройки видимости вида;
+                // use_active_view = false -> экспорт всего проекта (нужно для DTV)
+                options.FilterViewId = settings.UseActiveView ? view3d.Id : ElementId.InvalidElementId;
+                options.ExportBaseQuantities = settings.BaseQuantities;
+                options.WallAndColumnSplitting = settings.SplitWallsByLevel;
+                options.SpaceBoundaryLevel = settings.SpaceBoundaryLevel;
+                if (!string.IsNullOrEmpty(settings.MappingFile))
+                    options.FamilyMappingFile = settings.MappingFile;
+
+                ApplyOptions(options, settings);
+
+                // Ключи, которых нет в диалоге, уходят в движок как есть
+                foreach (KeyValuePair<string, string> extra in settings.ExtraOptions)
+                    AddOption(options, extra.Key, extra.Value, settings);
+
+                return doc.Export(folder, baseName, options);
+            }
+        }
+
+        private static void ReportExportError(Exception ex, ref string message)
+        {
+            message = ex.Message;
+            IfcExportLog.Write("ОШИБКА: " + ex);
+            TaskDialog.Show("IvanTools — Export To IFC",
+                "Экспорт прерван ошибкой:\n\n" + ex.Message +
+                "\n\nПодробности (стек вызова) — в логе:\n" +
+                Path.Combine(Path.GetTempPath(), "ExportToIfc.log"));
+        }
+
+        private static int CountIfcFiles(string folder)
+        {
+            try { return Directory.GetFiles(folder, "*.ifc").Length; }
+            catch { return -1; }
         }
 
         private static string BoolText(bool value)
@@ -358,7 +416,7 @@ namespace IvanTools
             sb.AppendLine("Схема: " + (summary != null && summary.Schema.Length > 0 ? summary.Schema : "?"));
             if (summary != null && summary.ViewDefinition.Length > 0)
                 sb.AppendLine("View: " + summary.ViewDefinition);
-            sb.AppendLine("Сборка: " + BuildInfo());
+            sb.AppendLine("Сборка: " + IfcExportLog.BuildInfo());
             sb.AppendLine("Время: " + seconds.ToString("0.0", CultureInfo.InvariantCulture) + " с");
             sb.AppendLine();
 
@@ -421,21 +479,6 @@ namespace IvanTools
             }
 
             return sb.ToString();
-        }
-        private static string BuildInfo()
-        {
-            try
-            {
-                string path = typeof(ExportToIfc).Assembly.Location;
-                if (string.IsNullOrEmpty(path))
-                    return "(динамическая сборка)";
-                return path + " (" +
-                    File.GetLastWriteTime(path).ToString("dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture) + ")";
-            }
-            catch
-            {
-                return "?";
-            }
         }
 
         private static List<string> CollectWarnings(IfcStepSummary summary, IfcExportSettings settings, long size, bool ok)
@@ -558,7 +601,7 @@ namespace IvanTools
             return new IfcExportPreset[]
             {
                 new IfcExportPreset("IFC4 DTV — передача проекта",
-                    "Design Transfer View: полная параметрика", IFCVersion.IFC4DTV, true, "Medium"),
+                    "Design Transfer View: полная параметрика", IFCVersion.IFC4DTV, true, ""),
                 new IfcExportPreset("IFC4 RV — референс",
                     "Reference View: лёгкая геометрия", IFCVersion.IFC4RV, false, "Low"),
                 new IfcExportPreset("IFC2x3 CV2 — координация",
@@ -598,6 +641,11 @@ namespace IvanTools
         public string DebugKeysReport = "";
         public readonly List<string> AppliedOptions = new List<string>();
 
+        // Диагностика и совместимость
+        public bool UseActiveView = true;    // false -> FilterViewId не ставится (весь проект)
+        public bool NoTransaction;           // true -> экспорт без нашей транзакции (проверка)
+        public string SkipOptions = "";      // ключи AddOption через ';', которые не отправлять
+
         // Конфиг (IvanTools.ini)
         public bool SaveToFile;
         public string ConfigInfo = "";
@@ -629,7 +677,7 @@ namespace IvanTools
             "export_rooms", "phase", "include_site_elevation", "use_family_type_name",
             "export_revit_psets", "export_ifc_common_psets", "export_user_psets", "user_psets_file",
             "export_schedules_as_psets", "schedules",
-            "store_ifc_guid", "debug_keys"
+            "store_ifc_guid", "use_active_view", "no_transaction", "skip_options", "debug_keys"
         };
 
         internal string FilePath;
@@ -865,6 +913,9 @@ namespace IvanTools
 
             // Прочее
             settings.StoreIfcGuid = ReadBool("store_ifc_guid", settings.StoreIfcGuid);
+            settings.UseActiveView = ReadBool("use_active_view", settings.UseActiveView);
+            settings.NoTransaction = ReadBool("no_transaction", settings.NoTransaction);
+            settings.SkipOptions = ReadText("skip_options", settings.SkipOptions);
             settings.DebugKeys = ReadBool("debug_keys", settings.DebugKeys);
 
             CollectExtras(settings);
@@ -1110,6 +1161,9 @@ namespace IvanTools
             wanted["schedules"] = settings.Schedules == null ? "" : settings.Schedules;
 
             wanted["store_ifc_guid"] = BoolText(settings.StoreIfcGuid);
+            wanted["use_active_view"] = BoolText(settings.UseActiveView);
+            wanted["no_transaction"] = BoolText(settings.NoTransaction);
+            wanted["skip_options"] = settings.SkipOptions == null ? "" : settings.SkipOptions;
             wanted["debug_keys"] = BoolText(settings.DebugKeys);
             return wanted;
         }
@@ -1169,6 +1223,12 @@ namespace IvanTools
             lines.Add("");
             lines.Add("; --- прочее ---");
             AddPair(lines, wanted, "store_ifc_guid");
+            lines.Add("; false = не фильтровать по активному виду (экспорт всего проекта)");
+            AddPair(lines, wanted, "use_active_view");
+            lines.Add("; true = экспорт без транзакции плагина (диагностика)");
+            AddPair(lines, wanted, "no_transaction");
+            lines.Add("; ключи AddOption через ';', которые НЕ отправлять (диагностика)");
+            AddPair(lines, wanted, "skip_options");
             lines.Add("; true = проверять, какие ключи AddOption принимает Revit (отчёт)");
             AddPair(lines, wanted, "debug_keys");
             lines.Add("");
@@ -1323,6 +1383,11 @@ namespace IvanTools
         private readonly ToolTip _tips = new ToolTip();
         private IfcConfigFile _config;
         private bool _suppressPresetDefaults;
+
+        // Диагностические ключи (только в .ini, без галочек в GUI) — сохраняем как есть
+        private bool _useActiveView = true;
+        private bool _noTransaction;
+        private string _skipOptions = "";
 
         public IfcExportSettings Settings { get; private set; }
         public IfcConfigFile Config { get { return _config; } }
@@ -1480,6 +1545,11 @@ namespace IvanTools
             _siteElevation = MakeCheck(page, "Отметка площадки (site elevation)", 230);
             _familyTypeName = MakeCheck(page, "Имя семейства и типа в Reference", 262);
 
+            // Дефолты совпадают с IfcExportSettings, а не «пустые галочки»
+            IfcExportSettings defaults = new IfcExportSettings();
+            _rooms.Checked = defaults.ExportRooms;
+            _siteElevation.Checked = defaults.IncludeSiteElevation;
+
             return page;
         }
 
@@ -1544,6 +1614,10 @@ namespace IvanTools
             _saveToFile.Text = "Сохранять настройки в файл проекта";
             _saveToFile.Bounds = new System.Drawing.Rectangle(320, 382, 420, 26);
             page.Controls.Add(_saveToFile);
+
+            IfcExportSettings defaults = new IfcExportSettings();
+            _revitPsets.Checked = defaults.ExportRevitPsets;
+            _commonPsets.Checked = defaults.ExportIfcCommonPsets;
 
             return page;
         }
@@ -1639,6 +1713,10 @@ namespace IvanTools
             settings.Schedules = _schedulesPath.Text.Trim();
             settings.StoreIfcGuid = _storeGuid.Checked;
             settings.DebugKeys = _debugKeys.Checked;
+
+            settings.UseActiveView = _useActiveView;
+            settings.NoTransaction = _noTransaction;
+            settings.SkipOptions = _skipOptions;
             return settings;
         }
 
@@ -1698,6 +1776,10 @@ namespace IvanTools
                     _schedulesPath.Text = snapshot.Schedules;
                     _storeGuid.Checked = snapshot.StoreIfcGuid;
                     _debugKeys.Checked = snapshot.DebugKeys;
+
+                    _useActiveView = snapshot.UseActiveView;
+                    _noTransaction = snapshot.NoTransaction;
+                    _skipOptions = snapshot.SkipOptions;
                 }
                 finally
                 {
@@ -2093,7 +2175,7 @@ namespace IvanTools
             Write("Конфиг: " + (string.IsNullOrEmpty(settings.ConfigInfo) ? "(не найден — значения по умолчанию)" : settings.ConfigInfo));
             if (settings.ConfigErrors.Count > 0)
                 Write("Конфиг-замечания: " + string.Join(" | ", settings.ConfigErrors.ToArray()));
-            Write("Сборка: " + typeof(ExportToIfc).Assembly.Location);
+            Write("Сборка: " + BuildInfo());
             Write("Файл: " + targetPath);
         }
 
@@ -2105,6 +2187,23 @@ namespace IvanTools
             }
             catch
             {
+            }
+        }
+
+        // Какая именно сборка выполняется: для DLL — путь и дата, для HotLoader — «динамическая»
+        internal static string BuildInfo()
+        {
+            try
+            {
+                string path = typeof(ExportToIfc).Assembly.Location;
+                if (string.IsNullOrEmpty(path))
+                    return "(динамическая сборка)";
+                return path + " (" +
+                    File.GetLastWriteTime(path).ToString("dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture) + ")";
+            }
+            catch
+            {
+                return "?";
             }
         }
     }
