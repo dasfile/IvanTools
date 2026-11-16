@@ -49,19 +49,23 @@ IFC рассматривается как **«запекание»** модел�
 
 ## 3. Пресеты
 
-| Пресет | `IFCVersion` | QTO | Split стен/колонн | Для чего |
+Классические BIM-виды IFC плюс разумные дефолты — пресет это только набор начальных значений, любая галочка потом переопределяется.
+
+| Пресет | `IFCVersion` | QTO | LOD | Для чего |
 |---|---|---|---|---|
-| **Лёгкий (IFC4 RV)** | `IFC4RV` | off | off | показ, координация: референсная геометрия, минимальный размер |
-| **Стандарт (IFC4)** — по умолчанию | `IFC4` | on | off | передача в Tekla: полная геометрия + объёмы |
-| **Совместимость (IFC2x3)** | `IFC2x3CV2` | on | off | требование ТЗ/старый софт (в 2x3 **нет** стадий — ограничение схемы) |
+| **IFC4 DTV — передача проекта** — по умолчанию | `IFC4DTV` | on | Medium | Design Transfer View: полная параметрика, обмен с Tekla/ArchiCAD; файл самый большой |
+| **IFC4 RV — референс** | `IFC4RV` | off | Low | Reference View: лёгкая геометрия, показ и координация |
+| **IFC2x3 CV2 — координация** | `IFC2x3CV2` | on | — | Coordination View 2.0: для проектов, где принят IFC2x3 (в 2x3 **нет** стадий) |
 
-Что важно понимать про «лёгкий»:
+Что важно понимать:
 
-* RV **не теряет семантику**: классы (`IfcWall`, `IfcSlab`, `IfcColumn`…), уровни/`IfcBuildingStorey`, типы и property sets остаются — облегчается **только геометрия** (без параметрических зависимостей и части сложных представлений);
-* маппинг — ревитовский (`FamilyMappingFile` по умолчанию пуст ⇒ используется штатная таблица Revit); своя таблица подключается опционально;
-* «излишняя параметризация» (DTV) не экспортируется ни одним пресетом.
+* **RV не теряет семантику**: классы (`IfcWall`, `IfcSlab`…), уровни/`IfcBuildingStorey`, типы и property sets остаются — облегчается **только геометрия**;
+* **DTV** передаёт параметрику (в т.ч. вырезы/сложные представления) — подходит для обмена в проектировании, но файл больше и часть просмотрщиков читает его хуже;
+* **CV2** — самый совместимый вариант «для старых»; «лёгкий 2x3» = CV2 со снятым QTO (отдельного пресета нет);
+* маппинг — ревитовский (`FamilyMappingFile` пуст ⇒ штатная таблица), своя таблица подключается опционально;
+* `TessellationLevelOfDetail` отправляется только для IFC4 (для 2x3 ключ не действует и не передаётся).
 
-Ожидание по размеру файла: RV < IFC4 < IFC2x3 — **проверяется** в Этапе 0 на одной модели, цифры вносятся в этот раздел.
+Размер файла: RV < DTV, CV2 зависит от модели. Фактические цифры по вашей модели — в отчёте (см. §7), вносятся по мере накопления.
 
 ---
 
@@ -77,33 +81,31 @@ IFC рассматривается как **«запекание»** модел�
 
 ## 5. UI
 
-Один модальный WinForms-диалог (в `TaskDialog` не помещаются независимые опции):
+Один модальный WinForms-диалог с **вкладками** (максимальный набор опций не влезает в одну простыню; `TaskDialog` для этого непригоден):
 
 ```text
-┌ Экспорт активного 3D-вида в IFC ────────────────────────────┐
-│ Пресет:                                                     │
-│  ( ) Лёгкий (IFC4 RV) — минимальный размер                  │
-│  (•) Стандарт (IFC4) — для Tekla: геометрия + объёмы        │
-│  ( ) Совместимость (IFC2x3 CV2)                             │
-│                                                             │
-│  [✓] Экспортировать базовые объёмы (QTO)                    │
-│  [ ] Разрезать стены и колонны по уровням                   │
-│                                                             │
-│  Файл маппинга семейств (необязательно):                    │
-│  [____________________________________] [Обзор…]            │
-│                                                             │
-│  Настройки: C:\Project\IvanTools.ini                        │
-│  [Загрузить…] [Сохранить как…]  [✓] в файл проекта          │
-│                                                             │
-│                                        [ Экспорт ] [Отмена] │
-└─────────────────────────────────────────────────────────────┘
+┌ Экспорт активного 3D-вида в IFC ────────────────────────────────┐
+│ [Пресет и объёмы] [Содержимое и геометрия] [PSets и конфиг]      │
+│ ┌ Пресет (классические BIM-виды) ────────────────────────────┐  │
+│ │ (•) IFC4 DTV — передача проекта (полная параметрика)       │  │
+│ │ ( ) IFC4 RV — референс (лёгкая геометрия)                  │  │
+│ │ ( ) IFC2x3 CV2 — координация (для проектов на 2x3)         │  │
+│ └────────────────────────────────────────────────────────────┘  │
+│ [✓] Базовые объёмы (QTO): длины, площади и объёмы по IFC        │
+│ [ ] Разрезать стены и колонны по уровням                        │
+│ Границы помещений: [0 — не экспортировать ▾]                    │
+│ ...                                                             │
+│                                    [ Экспорт ] [ Отмена ]       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-* выбор пресета переставляет значения чекбоксов на «дефолты пресета» (QTO: on для IFC4/2x3, off для RV; Split всегда off);
-* порядок применения: **пресет → его дефолты → значения из конфига** (§12): явные ключи файла перекрывают дефолты пресета;
-* смена пресета вручную сбрасывает флаги на дефолты пресета — осознанно, до v1.1 (там появятся `[ifc:PRESET]`);
-* под чекбоксами — строка «Настройки: `<путь к ini>`» (с числом замечаний), кнопки **«Загрузить…»** и **«Сохранить как…»**, галочка **«Сохранять настройки в файл проекта»** (включается сама, только если файл уже существует);
-* `Сохранить как…` (`SaveFileDialog`, фильтр `IFC (*.ifc)|*.ifc`), имя по умолчанию `{DocTitle}_{ViewName}.ifc`;
+* `AutoScaleMode = Font`, размеры под 125–150% DPI (раньше подписи «зажимало» из-за жёстких высот);
+* **вкладка 1**: 3 пресета, QTO, Split, space boundaries (0/1/2 — свойство `SpaceBoundaryLevel`);
+* **вкладка 2**: LOD (Low/Medium/High/не задано), linked files, 2D-элементы, только bounding box, помещения, фаза, отметка площадки, имя семейства+типа;
+* **вкладка 3**: PSets Revit / общие IFC / пользовательские (+ путь), расписания как PSets (+ имена), Store IFC GUID, `debug_keys`, файл маппинга, блок конфигурации (путь, «Загрузить…», «Сохранить как…», галочка, «Обзор…»);
+* **паритет GUI ↔ `.ini`**: каждый элемент диалога = ключ (§12), «накликать» и «написать» дают одно состояние;
+* выбор пресета ставит его дефолты (QTO, Split=false, LOD); порядок применения: **пресет → дефолты → ключи файла**;
+* «Сохранить как…» пишет файл сразу и делает его текущим; галочка автосохранения включается сама, только если файл уже есть;
 * если указан файл маппинга и его нет на диске — предупреждение и возврат в диалог.
 
 ---
@@ -160,33 +162,40 @@ using (Transaction transaction = new Transaction(doc, "Экспорт IFC"))
 
 Читает файл **потоком** (построчно, без загрузки целиком — файлы бывают 100+ МБ):
 
-1. Заголовок: `FILE_SCHEMA(('IFC4'|'IFC2X3'))`, `FILE_NAME` (имя, время, «originating system»).
+1. Заголовок: `FILE_SCHEMA(('IFC4'|'IFC2X3'))`, **`FILE_DESCRIPTION` → `ViewDefinition [ReferenceView_V1.2]`** (проверено на реальном файле: RV/DTV различаются именно здесь, а не в схеме), `FILE_NAME`.
 2. Счётчики сущностей: разбор строк вида `#123=IFCWALL('...` — имя сущности до `(`; подсчёт всех типов + `TotalEntities`.
-3. Явно вытаскиваются: `IFCWALL`, `IFCSLAB`, `IFCCOLUMN`, `IFCBEAM`, `IFCMEMBER`, `IFCPLATE`, `IFCDOOR`, `IFCWINDOW`, `IFCSTAIR`, `IFCROOF`, `IFCCOVERING`, `IFCBUILDINGELEMENTPROXY`, `IFCBUILDINGSTOREY`, `IFCSITE`, `IFCBUILDING`, `IFCPROJECT`, `IFCSURFACESTYLE`, `IFCSTYLEDITEM`, `IFCPROPERTYSET`, `IFCELEMENTQUANTITY`, `IFCRELCONTAINEDINSPATIALSTRUCTURE`.
+3. Явно вытаскиваются: `IFCWALL`, `IFCWALLSTANDARDCASE`, `IFCSLAB`, `IFCCOLUMN`, `IFCBEAM`, `IFCMEMBER`, `IFCPLATE`, `IFCDOOR`, `IFCWINDOW`, `IFCSTAIR`, `IFCROOF`, `IFCCOVERING`, `IFCBUILDINGELEMENTPROXY`, `IFCBUILDINGSTOREY`, `IFCSITE`, `IFCBUILDING`, `IFCPROJECT`, `IFCSURFACESTYLE`, `IFCSTYLEDITEM`, `IFCPROPERTYSET`, `IFCELEMENTQUANTITY`, `IFCRELCONTAINEDINSPATIALSTRUCTURE`.
 4. Стили: если `IFCSTYLEDITEM` = 0 — отдельное предупреждение «цвета/материалы в файл не попали».
 
-Отчёт (`TaskDialog`, стиль как у GLB-плагина):
+Отчёт — **свой WinForms-диалог**, а не `TaskDialog`: текст в `TextBox` `ReadOnly/Multiline` (Consolas) выделяется мышью и копируется `Ctrl+A`/`Ctrl+C`, есть кнопки **«Копировать»**, **«Открыть папку»**, **«Закрыть»**. `TaskDialog` Revit не позволяет выделять текст — это ограничение Autodesk, не плагина.
 
 ```text
-Файл: ...\SE003_3D.ifc
-Размер: 12.34 МБ (12 943 001 Б)
-Конфиг: ...\IvanTools.ini
-Пресет: Стандарт (IFC4)   Схема: IFC4
-Время: 24.1 с
+Файл: D:\project\outgoing\SE003_canopy.ifc
+Размер: 6.55 МБ (6 868 346 Б)
+Пресет: IFC4 RV — референс — Reference View: лёгкая геометрия
+Конфиг: D:\project\IvanTools.ini
+Схема: IFC4
+View: ReferenceView_V1.2
+Сборка: ...\IvanTools\ExportToIfc.dll (16.11.2026 12:27)
+Время: 51.2 с
 
-Сущностей: 84 512
-Стены: 312    Плиты: 78    Колонны: 96    Балки: 145
-Двери: 41     Окна: 88     Лестницы: 6    Кровля: 2
-Уровни (IfcBuildingStorey): 9    Сайт/здание: есть
-PSets: 1 240   QTO: 860   Стили: 214 (StyledItem: 214)
-AddOption: 2 (store_ifc_guid=true, tesselation_lod=Medium)
+Сущностей: 89 710
+Объекты:
+  Стены: 21    Плиты: 9    Колонны: 12    Балки: 22
+  Двери: 4     Окна: 0    Лестницы: 1    Кровля: 10
+  Покрытия: 0  Proxy: 825  Уровни: 4
+  Сайт: есть   Здание: есть   Проект: есть
 
-Предупреждения (2):
-  • IfcStyledItem = 0: цвета не экспортировались
-  • домен: файл не содержит IfcSlab
+PSets: 9150   QTO: 0   Стили: 27 (StyledItem: 6566)
+AddOption: 6 (TessellationLevelOfDetail=Low, ExportLinkedFiles=false, …)
+
+Предупреждения (3):
+  • QTO выключен: объёмов/площадей в файле нет (включается пресетами DTV/CV2)
+  • Proxy: 825 из 899 объектов — проверьте таблицу маппинга семейств
+  • Стены есть, но IfcWallStandardCase = 0 — у стен нет типа/стандартной геометрии
 ```
 
-Предупреждения (правила): схема не соответствует ожидаемой; `IFCPROJECT`/`IFCBUILDING`/`IFCBUILDINGSTOREY` отсутствуют; 0 стен и 0 плит; 0 стилей; размер < 1 КБ; экспорт вернул `false`; ошибки из лога Revit (см. Этап 0). Сюда же идут замечания конфига (§12) и непринятые ключи `AddOption` — с указанием строки файла или пары `key = value`.
+Предупреждения (правила): схема не соответствует пресету; `IFCPROJECT`/`IFCBUILDING`/`IFCBUILDINGSTOREY` отсутствуют; 0 стен и 0 плит; 0 стилей; размер < 1 КБ; экспорт вернул `false`; QTO включён, но наборов 0; **доля proxy > 20%**; **`IFCWALLSTANDARDCASE = 0` при непустых стенах**; DTV-предупреждение «файл больше»; замечания конфига (§12) с номерами строк; непринятые ключи `AddOption`. Строка `Сборка:` показывает, какая именно сборка выполнялась — важно при отладке через `CsHotLoader`.
 
 ---
 
@@ -194,7 +203,7 @@ AddOption: 2 (store_ifc_guid=true, tesselation_lod=Medium)
 
 1. `FilterViewId`: скрытые элементы и категории, фильтры вида, шаблон вида, фаза вида — что именно попадает в файл. Отдельно — активный Section Box (элементы вне куба).
 2. Три пресета на одной модели: размер файла, число сущностей, число стилей и QTO. Цифры → в §3.
-3. `AddOption`: **API подтверждён рефлексией** — `void AddOption(String name, String value)` в `IFCExportOptions` (Revit 2023). Осталось выяснить, какие **имена ключей** принимает движок (`TessellationLevelOfDetail`, списки property sets, «IFC GUID в параметр»); результат — таблица «ключ → принят / проигнорирован / исключение» в §12. Неизвестные ключи и исключения фиксируются в отчёте и не прерывают экспорт.
+3. `AddOption`: **API подтверждён рефлексией** — `void AddOption(String name, String value)` в `IFCExportOptions` (Revit 2023). Имена ключей проверяются режимом **`debug_keys = true`** (реализован): плагин прогоняет список кандидатов в пробном `IFCExportOptions` и пишет в лог/отчёт «ключ — без исключения / тип исключения». Результат переносится в таблицу §12; непринятые галочки из GUI убираются.
 4. Лог экспорта Revit: где лежит, формат, есть ли ошибки/предупреждения для отчёта.
 5. Поведение `Export`: имя с расширением/без, перезапись существующего файла, поведение при несохранённом документе, экспорт связей.
 6. Цвета: сравнение `IFCSTYLEDITEM`/`IFCSURFACESTYLE` для IFC4 и IFC2x3 на одной и той же модели.
@@ -205,7 +214,7 @@ AddOption: 2 (store_ifc_guid=true, tesselation_lod=Medium)
 
 * **Этап 1 (каркас).** `ExportToIfc` + `IfcExportDialog` + `IfcExportPreset/Settings`; экспорт через `doc.Export` с `FilterViewId`; поиск фактического файла; минимальный отчёт (размер, время, схема, всего сущностей); лог. Проверка: файл создаётся, три пресета дают три разных результата, ничего не падает на несохранённом документе.
 * **Этап 2 (диагностика).** `IfcStepSummary`: счётчики по типам, стили, PSets/QTO, проверки и предупреждения; полный отчёт в стиле GLB-плагина. Проверка: отчёт совпадает с ручным подсчётом по файлу (grep).
-* **Этап 3 (конфиг и доводка).** `IfcConfigFile` (§12): поиск, парсер, merge-запись; кнопки «Загрузить…»/«Сохранить как…» и галочка «Сохранять настройки в файл проекта»; относительные пути от папки ini; проверенные в Этапе 0 ключи `AddOption` вносятся в таблицу §12. Проверка: три сценария конфига (нет файла, файл рядом с `.rvt`, файл в `%APPDATA%`), правка ini руками не ломает экспорт, запись сохраняет комментарии и чужие ключи.
+* **Этап 3 (сделан).** Пресеты IFC4 DTV / IFC4 RV / IFC2x3 CV2; диалог на трёх вкладках со всем набором галочек; `space_boundaries`; режим `debug_keys`; копируемый отчёт (`IfcReportDialog`); `ViewDefinition` из `FILE_DESCRIPTION`; предупреждения proxy/WallStandardCase/QTO; строка «Сборка» в отчёте и логе; `.ini` — 21 ключ с паритетом GUI и merge-записью. Осталось: прогон `debug_keys = true` и перенос фактических имён ключей в §12.4.
 * **Этап 4 (по желанию).** Батч по нескольким 3D-видам; IFCZIP; экспорт нескольких пресетов за один запуск.
 
 ---
@@ -267,43 +276,83 @@ IvanTools.addin            (блок <AddIn>, новый уникальный Ad
 * секции: `[ifc]` — рабочая; `[ifc:PRESET]` — читается в отдельный словарь, применяется с v1.1 (в отчёт идёт пометка);
 * ключи до первой секции считаются принадлежащими `[ifc]`; чужие секции (`[glb]`) молча пропускаются.
 
-### 12.3. Пример
+### 12.3. Пример (полный набор ключей)
 
 ```ini
-; IvanTools — настройки экспорта IFC
-; Комментарий — строка, начинающаяся с ';' или '#'
+; IvanTools — настройки экспорта IFC (плагин Export To IFC)
+; Комментарий — строка, начинающаяся с ';' или '#'; inline-комментариев нет
 ; Ключи, которых нет в диалоге, передаются в IFCExportOptions.AddOption
 
 [ifc]
-preset = IFC4
+; пресет: IFC4DTV (передача) | IFC4RV (референс) | IFC2x3CV2 (координация)
+preset = IFC4DTV
+
+; --- объёмы, уровни, маппинг ---
 base_quantities = true
 split_walls_by_level = false
+space_boundaries = 0
 mapping_file =
 
-; --- ключи, которых нет в диалоге (уйдут в AddOption) ---
-; tesselation_lod = Medium
-; store_ifc_guid = true
-; export_revit_psets = true
-; export_ifc_common_psets = true
+; --- геометрия и содержимое ---
+tesselation_lod = Medium
+export_linked_files = false
+export_2d_elements = false
+export_bounding_box = false
+export_rooms = true
+phase =
+include_site_elevation = true
+use_family_type_name = false
 
+; --- property sets ---
+export_revit_psets = true
+export_ifc_common_psets = true
+export_user_psets = false
+user_psets_file =
+export_schedules_as_psets = false
+schedules =
+
+; --- прочее ---
+store_ifc_guid = false
+debug_keys = false
+
+; переопределения по пресету (читаются, применяются с v1.1)
 [ifc:IFC4RV]
 base_quantities = false
+tesselation_lod = Low
 ```
 
 ### 12.4. Маппинг ключей
 
-| Ключ | Куда идёт |
-|---|---|
-| `preset` | `IFCExportOptions.FileVersion` (через выбор пресета) |
-| `base_quantities` | `ExportBaseQuantities` |
-| `split_walls_by_level` | `WallAndColumnSplitting` |
-| `mapping_file` | `FamilyMappingFile` (относительный — от папки ini) |
-| любой другой непустой ключ | `AddOption(key, value)` + строка в лог и отчёт |
-| `space_boundary_level` | зарезервировано: `Int32`-свойство `SpaceBoundaryLevel`, добавить вместе с проверенными ключами |
+| Ключ `.ini` | Куда идёт | Статус |
+|---|---|---|
+| `preset` | `IFCExportOptions.FileVersion` (через пресет) | проверено (API) |
+| `base_quantities` | `ExportBaseQuantities` | проверено (API) |
+| `split_walls_by_level` | `WallAndColumnSplitting` | проверено (API) |
+| `space_boundaries` | `SpaceBoundaryLevel` (0/1/2) | проверено (API) |
+| `mapping_file` | `FamilyMappingFile` (относительный — от папки ini) | проверено (API) |
+| `tesselation_lod` | `AddOption("TessellationLevelOfDetail")`; не передаётся для 2x3 | кандидат |
+| `export_linked_files` | `AddOption("ExportLinkedFiles")` | кандидат |
+| `export_2d_elements` | `AddOption("Export2DElements")` | кандидат |
+| `export_bounding_box` | `AddOption("ExportBoundingBox")` | кандидат |
+| `export_rooms` | `AddOption("ExportRoomsInView")` | кандидат |
+| `phase` | `AddOption("PhaseToExport")` (пусто = все фазы) | кандидат |
+| `include_site_elevation` | `AddOption("IncludeSiteElevation")` | кандидат |
+| `use_family_type_name` | `AddOption("UseFamilyAndTypeNameForReference")` | кандидат |
+| `export_revit_psets` | `AddOption("ExportInternalRevitPropertySets")` | кандидат |
+| `export_ifc_common_psets` | `AddOption("ExportIFCCommonPropertySets")` | кандидат |
+| `export_user_psets` | `AddOption("ExportUserDefinedPsets")` | кандидат |
+| `user_psets_file` | `AddOption("UserDefinedPropertySetsFile")` | кандидат |
+| `export_schedules_as_psets` | `AddOption("ExportSchedulesAsPsets")` | кандидат |
+| `schedules` | `AddOption("ExportSpecificSchedules")` (имена через `;`) | кандидат |
+| `store_ifc_guid` | `AddOption("StoreIFCGUID")` | кандидат |
+| `debug_keys` | диагностика: прогон кандидатов в пробном `IFCExportOptions` | служебный |
+| любой другой непустой ключ | `AddOption(key, value)` + строка в лог и отчёт | как есть |
 
-`preset` принимает имена `IFCVersion` регистронезависимо; алиасы `IFC2X3` и `2X3` → `IFC2x3CV2`. Bool понимает `true/false`, `1/0`, `yes/no`, `on/off`, `да/нет`.
+«Кандидат» = имя ключа проверяется режимом `debug_keys = true`: результат переносится сюда как «принят / исключение», непринятые галочки убираются из GUI.
 
-Порядок применения: **пресет из файла → его дефолты (QTO, Split=false) → явные ключи файла**. Так `preset = IFC4RV` без `base_quantities` даёт QTO = false, как в диалоге.
+`preset` принимает имена `IFCVersion` регистронезависимо; алиасы `IFC2X3` и `2X3` → `IFC2x3CV2`; `space_boundaries` — 0..2; `tesselation_lod` — `Low|Medium|High` (или пусто). Bool понимает `true/false`, `1/0`, `yes/no`, `on/off`, `да/нет`.
+
+Порядок применения: **пресет из файла → его дефолты (QTO, Split=false, LOD) → явные ключи файла**. Так `preset = IFC4RV` без `base_quantities` даёт QTO = false и LOD = Low, как в диалоге.
 
 ### 12.5. Ошибки не ломают экспорт
 
@@ -336,7 +385,7 @@ base_quantities = false
 
 ### 12.8. Наблюдаемость
 
-Лог (`%TEMP%\ExportToIfc.log`): «Конфиг: `<путь>`», «Конфиг-замечания: …», `AddOption: key = value` построчно, «Конфиг: записано/не записано».
+Лог (`%TEMP%\ExportToIfc.log`): пресет, QTO/Split/Space boundaries, LOD и остальные флаги одной строкой, PSets, `debug_keys`, «Конфиг: `<путь>`», «Конфиг-замечания: …», «Сборка: `<путь к загруженной сборке>`», после экспорта — `AddOption: key=value; …` (фактически применённые), «Конфиг: записано/не записано».
 
-Отчёт: строка «Конфиг: …» после «Пресет» (+ статус записи отдельной строкой), строка `AddOption: N (k=v, …)` после PSets, замечания конфига и непринятые ключи — в общем блоке «Предупреждения».
+Отчёт: «Конфиг», «Схема», **«View»** (view definition из файла), **«Сборка»**, строка `AddOption: N (…)`, блок «Диагностика ключей AddOption» при `debug_keys`, предупреждения конфига/экспортёра. Отчёт выделяется и копируется целиком («Копировать»).
 

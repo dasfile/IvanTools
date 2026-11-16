@@ -43,6 +43,8 @@ using Autodesk.Revit.UI;
 // В Revit есть свои Form (DB.Form) и TextBox (UI.TextBox) — разрешаем неоднозначность
 using Form = System.Windows.Forms.Form;
 using TextBox = System.Windows.Forms.TextBox;
+using ComboBox = System.Windows.Forms.ComboBox;
+using Control = System.Windows.Forms.Control;
 
 namespace IvanTools
 {
@@ -77,7 +79,7 @@ namespace IvanTools
 
             IfcExportSettings settings;
             IfcExportPreset[] presets = IfcExportPreset.CreateAll();
-            using (IfcExportDialog dialog = new IfcExportDialog(presets, 1, config))
+            using (IfcExportDialog dialog = new IfcExportDialog(presets, 0, config))
             {
                 if (dialog.ShowDialog() != DialogResult.OK || dialog.Settings == null)
                     return Result.Cancelled;
@@ -113,6 +115,13 @@ namespace IvanTools
             IfcExportLog.Begin(settings, view3d, targetPath);
 
             bool ok;
+            if (settings.DebugKeys)
+            {
+                settings.DebugKeysReport = ProbeKeys();
+                IfcExportLog.Write("Диагностика ключей AddOption:");
+                IfcExportLog.Write(settings.DebugKeysReport);
+            }
+
             // Экспортёр IFC пишет в документ (IFC GUID, служебные параметры), поэтому
             // Document.Export для IFC требует открытой транзакции. Commit, а не RollBack:
             // IFC GUID сохраняются в модели и остаются стабильными между экспортами.
@@ -136,22 +145,16 @@ namespace IvanTools
                         options.FilterViewId = view3d.Id;
                         options.ExportBaseQuantities = settings.BaseQuantities;
                         options.WallAndColumnSplitting = settings.SplitWallsByLevel;
+                        options.SpaceBoundaryLevel = settings.SpaceBoundaryLevel;
                         if (!string.IsNullOrEmpty(settings.MappingFile))
                             options.FamilyMappingFile = settings.MappingFile;
 
-                        // Ключи, которых нет в диалоге, уходят в движок как есть.
-                        // Незнакомый ключ не должен ломать экспорт: фиксируем и идём дальше.
+                        ApplyOptions(options, settings);
+
+                        // Ключи, которых нет в диалоге, уходят в движок как есть:
+                        // незнакомый ключ не должен ломать экспорт.
                         foreach (KeyValuePair<string, string> extra in settings.ExtraOptions)
-                        {
-                            try
-                            {
-                                options.AddOption(extra.Key, extra.Value);
-                            }
-                            catch (Exception ex)
-                            {
-                                settings.AddOptionFailures.Add(extra.Key + " = " + extra.Value + " (" + ex.Message + ")");
-                            }
-                        }
+                            AddOption(options, extra.Key, extra.Value, settings);
 
                         ok = doc.Export(folder, baseName, options);
                     }
@@ -208,12 +211,103 @@ namespace IvanTools
                 IfcExportLog.Write("Конфиг: " + configStatus);
             }
 
+            if (settings.AppliedOptions.Count > 0)
+                IfcExportLog.Write("AddOption: " + string.Join("; ", settings.AppliedOptions.ToArray()));
+
             string report = BuildReport(actualPath, summary, summaryError, settings, seconds, ok);
             IfcExportLog.Write(report);
-            TaskDialog.Show("IvanTools — Export To IFC", report);
+
+            // Свой Form, а не TaskDialog: текст можно выделить и скопировать
+            using (IfcReportDialog reportDialog =
+                new IfcReportDialog("Экспорт IFC — отчёт", report, actualPath))
+            {
+                reportDialog.ShowDialog();
+            }
 
             bool good = ok && summary != null && summary.TotalEntities > 0;
             return good ? Result.Succeeded : Result.Failed;
+        }
+
+        // ---------------------------------------------------------------------
+        // Опции движка: свойства + AddOption (имена ключей проверяются диагностикой)
+        // ---------------------------------------------------------------------
+        private static void ApplyOptions(IFCExportOptions options, IfcExportSettings settings)
+        {
+            // Тесселяция действует только для IFC4
+            if (settings.Version != IFCVersion.IFC2x3CV2)
+                AddOption(options, "TessellationLevelOfDetail", settings.TesselationLod, settings);
+
+            AddOption(options, "ExportLinkedFiles", BoolText(settings.ExportLinkedFiles), settings);
+            AddOption(options, "Export2DElements", BoolText(settings.Export2DElements), settings);
+            AddOption(options, "ExportBoundingBox", BoolText(settings.ExportBoundingBox), settings);
+            AddOption(options, "ExportRoomsInView", BoolText(settings.ExportRooms), settings);
+            AddOption(options, "IncludeSiteElevation", BoolText(settings.IncludeSiteElevation), settings);
+            AddOption(options, "UseFamilyAndTypeNameForReference", BoolText(settings.UseFamilyTypeName), settings);
+
+            AddOption(options, "ExportInternalRevitPropertySets", BoolText(settings.ExportRevitPsets), settings);
+            AddOption(options, "ExportIFCCommonPropertySets", BoolText(settings.ExportIfcCommonPsets), settings);
+            AddOption(options, "ExportUserDefinedPsets", BoolText(settings.ExportUserPsets), settings);
+            AddOption(options, "ExportSchedulesAsPsets", BoolText(settings.ExportSchedulesAsPsets), settings);
+            AddOption(options, "StoreIFCGUID", BoolText(settings.StoreIfcGuid), settings);
+
+            if (!string.IsNullOrEmpty(settings.UserPsetsFile))
+                AddOption(options, "UserDefinedPropertySetsFile", settings.UserPsetsFile, settings);
+            if (!string.IsNullOrEmpty(settings.Schedules))
+                AddOption(options, "ExportSpecificSchedules", settings.Schedules, settings);
+            if (!string.IsNullOrEmpty(settings.Phase))
+                AddOption(options, "PhaseToExport", settings.Phase, settings);
+        }
+
+        private static void AddOption(IFCExportOptions options, string key, string value,
+            IfcExportSettings settings)
+        {
+            if (string.IsNullOrEmpty(value))
+                return;         // «(не задано)», пустые фаза и расписания
+            try
+            {
+                options.AddOption(key, value);
+                settings.AppliedOptions.Add(key + "=" + value);
+            }
+            catch (Exception ex)
+            {
+                settings.AddOptionFailures.Add(key + "=" + value + " (" + ex.Message + ")");
+            }
+        }
+
+        private static string BoolText(bool value)
+        {
+            return value ? "true" : "false";
+        }
+
+        // Диагностика (debug_keys = true): какие ключи движок принимает без исключения
+        private static string ProbeKeys()
+        {
+            string[] keys = new string[]
+            {
+                "TessellationLevelOfDetail", "ExportLinkedFiles", "Export2DElements",
+                "ExportBoundingBox", "ExportRoomsInView", "IncludeSiteElevation",
+                "UseFamilyAndTypeNameForReference", "ExportInternalRevitPropertySets",
+                "ExportIFCCommonPropertySets", "ExportUserDefinedPsets",
+                "UserDefinedPropertySetsFile", "ExportSchedulesAsPsets",
+                "ExportSpecificSchedules", "PhaseToExport", "StoreIFCGUID"
+            };
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < keys.Length; i++)
+            {
+                string result;
+                try
+                {
+                    using (IFCExportOptions probe = new IFCExportOptions())
+                        probe.AddOption(keys[i], "true");
+                    result = "без исключения";
+                }
+                catch (Exception ex)
+                {
+                    result = ex.GetType().Name + ": " + ex.Message;
+                }
+                sb.AppendLine("  " + keys[i] + " — " + result);
+            }
+            return sb.ToString();
         }
 
         // Revit создаёт файл сам; имя/расширение может отличаться от введённого
@@ -261,8 +355,10 @@ namespace IvanTools
             sb.AppendLine("Конфиг: " + (settings.ConfigInfo.Length > 0 ? settings.ConfigInfo : "нет данных"));
             if (!string.IsNullOrEmpty(settings.ConfigStatus))
                 sb.AppendLine("  " + settings.ConfigStatus);
-            sb.AppendLine("Схема: " + (summary != null && summary.Schema.Length > 0 ? summary.Schema : "?") +
-                " (RV/DTV в заголовке не различаются)");
+            sb.AppendLine("Схема: " + (summary != null && summary.Schema.Length > 0 ? summary.Schema : "?"));
+            if (summary != null && summary.ViewDefinition.Length > 0)
+                sb.AppendLine("View: " + summary.ViewDefinition);
+            sb.AppendLine("Сборка: " + BuildInfo());
             sb.AppendLine("Время: " + seconds.ToString("0.0", CultureInfo.InvariantCulture) + " с");
             sb.AppendLine();
 
@@ -295,16 +391,24 @@ namespace IvanTools
                 "    Стили: " + summary.Count("IFCSURFACESTYLE").ToString() +
                 " (StyledItem: " + summary.Count("IFCSTYLEDITEM").ToString() + ")");
 
-            if (settings.ExtraOptions.Count > 0)
+            if (settings.AppliedOptions.Count > 0)
             {
                 StringBuilder extra = new StringBuilder();
-                foreach (KeyValuePair<string, string> kv in settings.ExtraOptions)
+                for (int i = 0; i < settings.AppliedOptions.Count; i++)
                 {
                     if (extra.Length > 0)
                         extra.Append(", ");
-                    extra.Append(kv.Key).Append("=").Append(kv.Value);
+                    extra.Append(settings.AppliedOptions[i]);
                 }
-                sb.AppendLine("AddOption: " + settings.ExtraOptions.Count.ToString() + " (" + extra.ToString() + ")");
+                sb.AppendLine("AddOption: " + settings.AppliedOptions.Count.ToString() +
+                    " (" + extra.ToString() + ")");
+            }
+
+            if (settings.DebugKeysReport.Length > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("Диагностика ключей AddOption (debug_keys):");
+                sb.Append(settings.DebugKeysReport);
             }
 
             List<string> warnings = CollectWarnings(summary, settings, size, ok);
@@ -318,6 +422,22 @@ namespace IvanTools
 
             return sb.ToString();
         }
+        private static string BuildInfo()
+        {
+            try
+            {
+                string path = typeof(ExportToIfc).Assembly.Location;
+                if (string.IsNullOrEmpty(path))
+                    return "(динамическая сборка)";
+                return path + " (" +
+                    File.GetLastWriteTime(path).ToString("dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture) + ")";
+            }
+            catch
+            {
+                return "?";
+            }
+        }
+
         private static List<string> CollectWarnings(IfcStepSummary summary, IfcExportSettings settings, long size, bool ok)
         {
             List<string> warnings = new List<string>();
@@ -345,7 +465,22 @@ namespace IvanTools
                 warnings.Add("IfcStyledItem = 0: цвета/материалы в файл не попали");
 
             if (settings.BaseQuantities && summary.Count("IFCELEMENTQUANTITY") == 0)
-                warnings.Add("QTO включён, но IfcElementQuantity = 0");
+                warnings.Add("QTO включён, но IfcElementQuantity = 0 — объёмы в файл не попали");
+            if (!settings.BaseQuantities)
+                warnings.Add("QTO выключен: объёмов/площадей в файле нет (включается пресетами DTV/CV2)");
+
+            int proxies = summary.Count("IFCBUILDINGELEMENTPROXY");
+            int typed = walls + slabs + summary.Count("IFCCOLUMN") + summary.Count("IFCBEAM") +
+                summary.Count("IFCMEMBER") + summary.Count("IFCPLATE") + summary.Count("IFCDOOR") +
+                summary.Count("IFCWINDOW") + summary.Count("IFCSTAIR") + summary.Count("IFCROOF") +
+                summary.Count("IFCCOVERING");
+            if (proxies > 0 && proxies * 100 / (typed + proxies) > 20)
+                warnings.Add("Proxy: " + proxies.ToString() + " из " + (typed + proxies).ToString() +
+                    " объектов — проверьте таблицу маппинга семейств");
+            if (walls > 0 && summary.Count("IFCWALLSTANDARDCASE") == 0)
+                warnings.Add("Стены есть, но IfcWallStandardCase = 0 — у стен нет типа/стандартной геометрии");
+            if (settings.Version == IFCVersion.IFC4DTV)
+                warnings.Add("IFC4 DTV: полная параметрика, файл больше; для показа используйте RV");
 
             string expected = settings.Version == IFCVersion.IFC2x3CV2 ? "IFC2X3" : "IFC4";
             if (summary.Schema.Length > 0 &&
@@ -400,13 +535,16 @@ namespace IvanTools
         public string Description;
         public IFCVersion Version;
         public bool DefaultBaseQuantities;
+        public string DefaultLod;      // "" = TessellationLevelOfDetail не передавать
 
-        public IfcExportPreset(string name, string description, IFCVersion version, bool defaultBaseQuantities)
+        public IfcExportPreset(string name, string description, IFCVersion version,
+            bool defaultBaseQuantities, string defaultLod)
         {
             Name = name;
             Description = description;
             Version = version;
             DefaultBaseQuantities = defaultBaseQuantities;
+            DefaultLod = defaultLod;
         }
 
         public string Caption
@@ -414,13 +552,17 @@ namespace IvanTools
             get { return Name + " — " + Description; }
         }
 
+        // Классические BIM-пресеты: Design Transfer / Reference / Coordination View 2.0
         public static IfcExportPreset[] CreateAll()
         {
             return new IfcExportPreset[]
             {
-                new IfcExportPreset("Лёгкий (IFC4 RV)", "минимальный размер, референсная геометрия", IFCVersion.IFC4RV, false),
-                new IfcExportPreset("Стандарт (IFC4)", "для Tekla: полная геометрия и объёмы", IFCVersion.IFC4, true),
-                new IfcExportPreset("Совместимость (IFC2x3 CV2)", "если в ТЗ IFC2x3", IFCVersion.IFC2x3CV2, true)
+                new IfcExportPreset("IFC4 DTV — передача проекта",
+                    "Design Transfer View: полная параметрика", IFCVersion.IFC4DTV, true, "Medium"),
+                new IfcExportPreset("IFC4 RV — референс",
+                    "Reference View: лёгкая геометрия", IFCVersion.IFC4RV, false, "Low"),
+                new IfcExportPreset("IFC2x3 CV2 — координация",
+                    "Coordination View 2.0: для проектов на 2x3", IFCVersion.IFC2x3CV2, true, "")
             };
         }
     }
@@ -431,6 +573,30 @@ namespace IvanTools
         public bool BaseQuantities;
         public bool SplitWallsByLevel;
         public string MappingFile = "";
+
+        // Геометрия и содержимое
+        public int SpaceBoundaryLevel;                 // 0 = не экспортировать
+        public string TesselationLod = "";             // Low | Medium | High | ""
+        public bool ExportLinkedFiles;
+        public bool Export2DElements;
+        public bool ExportBoundingBox;
+        public bool ExportRooms = true;
+        public string Phase = "";                      // пусто = все фазы
+        public bool IncludeSiteElevation = true;
+        public bool UseFamilyTypeName;
+
+        // Свойства (property sets)
+        public bool ExportRevitPsets = true;
+        public bool ExportIfcCommonPsets = true;
+        public bool ExportUserPsets;
+        public string UserPsetsFile = "";
+        public bool ExportSchedulesAsPsets;
+        public string Schedules = "";
+        public bool StoreIfcGuid;
+
+        public bool DebugKeys;
+        public string DebugKeysReport = "";
+        public readonly List<string> AppliedOptions = new List<string>();
 
         // Конфиг (IvanTools.ini)
         public bool SaveToFile;
@@ -458,7 +624,12 @@ namespace IvanTools
         // Порядок ключей при записи нового файла и при добавлении недостающих
         private static readonly string[] KnownKeys = new string[]
         {
-            "preset", "base_quantities", "split_walls_by_level", "mapping_file"
+            "preset", "base_quantities", "split_walls_by_level", "space_boundaries", "mapping_file",
+            "tesselation_lod", "export_linked_files", "export_2d_elements", "export_bounding_box",
+            "export_rooms", "phase", "include_site_elevation", "use_family_type_name",
+            "export_revit_psets", "export_ifc_common_psets", "export_user_psets", "user_psets_file",
+            "export_schedules_as_psets", "schedules",
+            "store_ifc_guid", "debug_keys"
         };
 
         internal string FilePath;
@@ -647,7 +818,6 @@ namespace IvanTools
                 return;
 
             string text;
-            bool flag;
 
             // Пресет приносит свои дефолты; явные ключи файла применяются поверх
             IfcExportPreset preset = settings.Preset;
@@ -658,33 +828,98 @@ namespace IvanTools
                     preset = match;
                 else
                     Errors.Add("preset = " + text +
-                        ": неизвестный пресет (есть IFC4, IFC4RV, IFC2x3CV2) — оставлен текущий");
+                        ": неизвестный пресет (есть IFC4DTV, IFC4RV, IFC2x3CV2) — оставлен текущий");
             }
             if (preset != null)
             {
                 settings.Preset = preset;
                 settings.BaseQuantities = preset.DefaultBaseQuantities;
                 settings.SplitWallsByLevel = false;
+                settings.TesselationLod = preset.DefaultLod;
             }
 
-            if (Values.TryGetValue("base_quantities", out text))
-            {
-                if (TryParseBool(text, out flag))
-                    settings.BaseQuantities = flag;
-                else
-                    Errors.Add("base_quantities = " + text + ": ожидается true/false");
-            }
-            if (Values.TryGetValue("split_walls_by_level", out text))
-            {
-                if (TryParseBool(text, out flag))
-                    settings.SplitWallsByLevel = flag;
-                else
-                    Errors.Add("split_walls_by_level = " + text + ": ожидается true/false");
-            }
-            if (Values.TryGetValue("mapping_file", out text))
-                settings.MappingFile = ResolvePath(text);
+            // Объёмы и уровни
+            settings.BaseQuantities = ReadBool("base_quantities", settings.BaseQuantities);
+            settings.SplitWallsByLevel = ReadBool("split_walls_by_level", settings.SplitWallsByLevel);
+            settings.SpaceBoundaryLevel = ReadInt("space_boundaries", settings.SpaceBoundaryLevel, 0, 2);
+            settings.MappingFile = ReadPath("mapping_file", settings.MappingFile);
+
+            // Геометрия и содержимое
+            settings.TesselationLod = ReadChoice("tesselation_lod", settings.TesselationLod,
+                new string[] { "", "Low", "Medium", "High" });
+            settings.ExportLinkedFiles = ReadBool("export_linked_files", settings.ExportLinkedFiles);
+            settings.Export2DElements = ReadBool("export_2d_elements", settings.Export2DElements);
+            settings.ExportBoundingBox = ReadBool("export_bounding_box", settings.ExportBoundingBox);
+            settings.ExportRooms = ReadBool("export_rooms", settings.ExportRooms);
+            settings.Phase = ReadText("phase", settings.Phase);
+            settings.IncludeSiteElevation = ReadBool("include_site_elevation", settings.IncludeSiteElevation);
+            settings.UseFamilyTypeName = ReadBool("use_family_type_name", settings.UseFamilyTypeName);
+
+            // Property sets
+            settings.ExportRevitPsets = ReadBool("export_revit_psets", settings.ExportRevitPsets);
+            settings.ExportIfcCommonPsets = ReadBool("export_ifc_common_psets", settings.ExportIfcCommonPsets);
+            settings.ExportUserPsets = ReadBool("export_user_psets", settings.ExportUserPsets);
+            settings.UserPsetsFile = ReadPath("user_psets_file", settings.UserPsetsFile);
+            settings.ExportSchedulesAsPsets = ReadBool("export_schedules_as_psets", settings.ExportSchedulesAsPsets);
+            settings.Schedules = ReadText("schedules", settings.Schedules);
+
+            // Прочее
+            settings.StoreIfcGuid = ReadBool("store_ifc_guid", settings.StoreIfcGuid);
+            settings.DebugKeys = ReadBool("debug_keys", settings.DebugKeys);
 
             CollectExtras(settings);
+        }
+
+        private bool ReadBool(string key, bool current)
+        {
+            string text;
+            bool value;
+            if (!Values.TryGetValue(key, out text))
+                return current;
+            if (TryParseBool(text, out value))
+                return value;
+            Errors.Add(key + " = " + text + ": ожидается true/false — оставлено текущее");
+            return current;
+        }
+
+        private int ReadInt(string key, int current, int min, int max)
+        {
+            string text;
+            int value;
+            if (!Values.TryGetValue(key, out text))
+                return current;
+            if (int.TryParse(text, out value) && value >= min && value <= max)
+                return value;
+            Errors.Add(key + " = " + text + ": ожидается число " + min.ToString() + ".." + max.ToString());
+            return current;
+        }
+
+        private string ReadText(string key, string current)
+        {
+            string text;
+            return Values.TryGetValue(key, out text) ? text.Trim() : current;
+        }
+
+        private string ReadPath(string key, string current)
+        {
+            string text;
+            return Values.TryGetValue(key, out text) ? ResolvePath(text) : current;
+        }
+
+        private string ReadChoice(string key, string current, string[] allowed)
+        {
+            string text;
+            if (!Values.TryGetValue(key, out text))
+                return current;
+            string value = text.Trim();
+            for (int i = 0; i < allowed.Length; i++)
+            {
+                if (allowed[i].Equals(value, StringComparison.OrdinalIgnoreCase))
+                    return allowed[i];
+            }
+            Errors.Add(key + " = " + value + ": допустимо " +
+                string.Join(", ", allowed) + " — оставлено текущее");
+            return current;
         }
 
         // Только «прочие» ключи: нужны и при загрузке, и перед экспортом
@@ -853,26 +1088,89 @@ namespace IvanTools
         {
             Dictionary<string, string> wanted = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             wanted["preset"] = settings.Preset.Version.ToString();
-            wanted["base_quantities"] = settings.BaseQuantities ? "true" : "false";
-            wanted["split_walls_by_level"] = settings.SplitWallsByLevel ? "true" : "false";
+            wanted["base_quantities"] = BoolText(settings.BaseQuantities);
+            wanted["split_walls_by_level"] = BoolText(settings.SplitWallsByLevel);
+            wanted["space_boundaries"] = settings.SpaceBoundaryLevel.ToString(CultureInfo.InvariantCulture);
             wanted["mapping_file"] = RelativeTo(folder, settings.MappingFile);
+
+            wanted["tesselation_lod"] = settings.TesselationLod == null ? "" : settings.TesselationLod;
+            wanted["export_linked_files"] = BoolText(settings.ExportLinkedFiles);
+            wanted["export_2d_elements"] = BoolText(settings.Export2DElements);
+            wanted["export_bounding_box"] = BoolText(settings.ExportBoundingBox);
+            wanted["export_rooms"] = BoolText(settings.ExportRooms);
+            wanted["phase"] = settings.Phase == null ? "" : settings.Phase;
+            wanted["include_site_elevation"] = BoolText(settings.IncludeSiteElevation);
+            wanted["use_family_type_name"] = BoolText(settings.UseFamilyTypeName);
+
+            wanted["export_revit_psets"] = BoolText(settings.ExportRevitPsets);
+            wanted["export_ifc_common_psets"] = BoolText(settings.ExportIfcCommonPsets);
+            wanted["export_user_psets"] = BoolText(settings.ExportUserPsets);
+            wanted["user_psets_file"] = RelativeTo(folder, settings.UserPsetsFile);
+            wanted["export_schedules_as_psets"] = BoolText(settings.ExportSchedulesAsPsets);
+            wanted["schedules"] = settings.Schedules == null ? "" : settings.Schedules;
+
+            wanted["store_ifc_guid"] = BoolText(settings.StoreIfcGuid);
+            wanted["debug_keys"] = BoolText(settings.DebugKeys);
             return wanted;
+        }
+
+        private static string BoolText(bool value)
+        {
+            return value ? "true" : "false";
+        }
+
+        private static void AddPair(List<string> lines, Dictionary<string, string> wanted, string key)
+        {
+            string value;
+            if (wanted.TryGetValue(key, out value))
+                lines.Add(key + " = " + value);
         }
 
         private static List<string> NewFileLines(Dictionary<string, string> wanted)
         {
             List<string> lines = new List<string>();
-            lines.Add("; IvanTools — настройки экспорта IFC");
-            lines.Add("; Комментарий — строка, начинающаяся с ';' или '#'");
+            lines.Add("; IvanTools — настройки экспорта IFC (плагин Export To IFC)");
+            lines.Add("; Комментарий — строка, начинающаяся с ';' или '#'; inline-комментариев нет");
             lines.Add("; Ключи, которых нет в диалоге, передаются в IFCExportOptions.AddOption");
             lines.Add("");
             lines.Add("[" + SectionName + "]");
-            for (int i = 0; i < KnownKeys.Length; i++)
-                lines.Add(KnownKeys[i] + " = " + wanted[KnownKeys[i]]);
+            lines.Add("; пресет: IFC4DTV (передача) | IFC4RV (референс) | IFC2x3CV2 (координация)");
+            AddPair(lines, wanted, "preset");
             lines.Add("");
-            lines.Add("; --- ключи, которых нет в диалоге (уйдут в AddOption) ---");
-            lines.Add("; tesselation_lod = Medium");
-            lines.Add("; store_ifc_guid = true");
+            lines.Add("; --- объёмы, уровни, маппинг ---");
+            AddPair(lines, wanted, "base_quantities");
+            AddPair(lines, wanted, "split_walls_by_level");
+            lines.Add("; границы помещений: 0 = не экспортировать, 1 или 2");
+            AddPair(lines, wanted, "space_boundaries");
+            lines.Add("; пусто = штатная таблица Revit; относительный путь — от папки этого файла");
+            AddPair(lines, wanted, "mapping_file");
+            lines.Add("");
+            lines.Add("; --- геометрия и содержимое ---");
+            lines.Add("; тесселяция: Low | Medium | High; пусто = не передавать (для 2x3 не действует)");
+            AddPair(lines, wanted, "tesselation_lod");
+            AddPair(lines, wanted, "export_linked_files");
+            AddPair(lines, wanted, "export_2d_elements");
+            lines.Add("; true = только ограничивающий бокс, без геометрии");
+            AddPair(lines, wanted, "export_bounding_box");
+            AddPair(lines, wanted, "export_rooms");
+            lines.Add("; имя фазы; пусто = все фазы");
+            AddPair(lines, wanted, "phase");
+            AddPair(lines, wanted, "include_site_elevation");
+            AddPair(lines, wanted, "use_family_type_name");
+            lines.Add("");
+            lines.Add("; --- property sets ---");
+            AddPair(lines, wanted, "export_revit_psets");
+            AddPair(lines, wanted, "export_ifc_common_psets");
+            AddPair(lines, wanted, "export_user_psets");
+            AddPair(lines, wanted, "user_psets_file");
+            AddPair(lines, wanted, "export_schedules_as_psets");
+            lines.Add("; имена расписаний через ';'");
+            AddPair(lines, wanted, "schedules");
+            lines.Add("");
+            lines.Add("; --- прочее ---");
+            AddPair(lines, wanted, "store_ifc_guid");
+            lines.Add("; true = проверять, какие ключи AddOption принимает Revit (отчёт)");
+            AddPair(lines, wanted, "debug_keys");
             lines.Add("");
             return lines;
         }
@@ -992,12 +1290,36 @@ namespace IvanTools
     internal sealed class IfcExportDialog : Form
     {
         private readonly IfcExportPreset[] _presets;
-        private readonly RadioButton[] _radios;
-        private readonly CheckBox _qto;
-        private readonly CheckBox _split;
-        private readonly TextBox _mapping;
-        private readonly Label _configLabel;
-        private readonly CheckBox _saveToFile;
+        private RadioButton[] _radios;
+
+        // Вкладка «Пресет и объёмы»
+        private CheckBox _qto;
+        private CheckBox _split;
+        private ComboBox _spaceBoundaries;
+
+        // Вкладка «Содержимое и геометрия»
+        private ComboBox _lod;
+        private CheckBox _linked;
+        private CheckBox _twoD;
+        private CheckBox _boundingBox;
+        private CheckBox _rooms;
+        private TextBox _phase;
+        private CheckBox _siteElevation;
+        private CheckBox _familyTypeName;
+
+        // Вкладка «PSets, конфиг»
+        private CheckBox _revitPsets;
+        private CheckBox _commonPsets;
+        private CheckBox _userPsets;
+        private TextBox _userPsetsPath;
+        private CheckBox _schedulesAsPsets;
+        private TextBox _schedulesPath;
+        private CheckBox _storeGuid;
+        private CheckBox _debugKeys;
+        private TextBox _mapping;
+        private Label _configLabel;
+        private CheckBox _saveToFile;
+
         private readonly ToolTip _tips = new ToolTip();
         private IfcConfigFile _config;
         private bool _suppressPresetDefaults;
@@ -1016,82 +1338,26 @@ namespace IvanTools
             MaximizeBox = false;
             MinimizeBox = false;
             ShowInTaskbar = false;
-            ClientSize = new System.Drawing.Size(560, 356);
+            AutoScaleMode = AutoScaleMode.Font;
+            ClientSize = new System.Drawing.Size(800, 600);
             Font = new System.Drawing.Font("Segoe UI", 9f);
 
-            GroupBox group = new GroupBox();
-            group.Text = "Пресет";
-            group.Bounds = new System.Drawing.Rectangle(12, 8, 536, 116);
-            Controls.Add(group);
-
-            _radios = new RadioButton[presets.Length];
-            for (int i = 0; i < presets.Length; i++)
-            {
-                RadioButton radio = new RadioButton();
-                radio.Text = presets[i].Caption;
-                radio.Bounds = new System.Drawing.Rectangle(14, 22 + i * 28, 508, 24);
-                radio.Tag = i;
-                radio.CheckedChanged += new EventHandler(OnPresetChanged);
-                group.Controls.Add(radio);
-                _radios[i] = radio;
-            }
-
-            _qto = new CheckBox();
-            _qto.Text = "Экспортировать базовые объёмы (QTO)";
-            _qto.Bounds = new System.Drawing.Rectangle(12, 132, 420, 22);
-            Controls.Add(_qto);
-
-            _split = new CheckBox();
-            _split.Text = "Разрезать стены и колонны по уровням (обычно не нужно)";
-            _split.Bounds = new System.Drawing.Rectangle(12, 156, 520, 22);
-            Controls.Add(_split);
-
-            Label mappingLabel = new Label();
-            mappingLabel.Text = "Файл маппинга семейств (необязательно; пусто = таблица Revit):";
-            mappingLabel.Bounds = new System.Drawing.Rectangle(12, 190, 520, 20);
-            Controls.Add(mappingLabel);
-
-            _mapping = new TextBox();
-            _mapping.Bounds = new System.Drawing.Rectangle(12, 212, 420, 23);
-            Controls.Add(_mapping);
-
-            Button browse = new Button();
-            browse.Text = "Обзор…";
-            browse.Bounds = new System.Drawing.Rectangle(440, 210, 108, 26);
-            browse.Click += new EventHandler(OnBrowse);
-            Controls.Add(browse);
-
-            _configLabel = new Label();
-            _configLabel.Bounds = new System.Drawing.Rectangle(12, 246, 536, 18);
-            _configLabel.AutoEllipsis = true;
-            Controls.Add(_configLabel);
-
-            Button load = new Button();
-            load.Text = "Загрузить…";
-            load.Bounds = new System.Drawing.Rectangle(12, 266, 104, 26);
-            load.Click += new EventHandler(OnLoadConfig);
-            Controls.Add(load);
-
-            Button saveAs = new Button();
-            saveAs.Text = "Сохранить как…";
-            saveAs.Bounds = new System.Drawing.Rectangle(122, 266, 140, 26);
-            saveAs.Click += new EventHandler(OnSaveConfigAs);
-            Controls.Add(saveAs);
-
-            _saveToFile = new CheckBox();
-            _saveToFile.Text = "Сохранять настройки в файл проекта";
-            _saveToFile.Bounds = new System.Drawing.Rectangle(272, 268, 280, 22);
-            Controls.Add(_saveToFile);
+            TabControl tabs = new TabControl();
+            tabs.Bounds = new System.Drawing.Rectangle(12, 12, 776, 520);
+            Controls.Add(tabs);
+            tabs.TabPages.Add(BuildPresetTab());
+            tabs.TabPages.Add(BuildContentTab());
+            tabs.TabPages.Add(BuildPsetsTab());
 
             Button ok = new Button();
             ok.Text = "Экспорт";
-            ok.Bounds = new System.Drawing.Rectangle(340, 316, 100, 27);
+            ok.Bounds = new System.Drawing.Rectangle(556, 548, 108, 30);
             ok.DialogResult = DialogResult.OK;
             Controls.Add(ok);
 
             Button cancel = new Button();
             cancel.Text = "Отмена";
-            cancel.Bounds = new System.Drawing.Rectangle(448, 316, 100, 27);
+            cancel.Bounds = new System.Drawing.Rectangle(672, 548, 108, 30);
             cancel.DialogResult = DialogResult.Cancel;
             Controls.Add(cancel);
 
@@ -1103,6 +1369,193 @@ namespace IvanTools
             _radios[index].Checked = true;
             ApplyPresetDefaults(index);
             ApplyConfig(_config);
+        }
+
+        // ---------------------------------------------------------------------
+        // Вкладки диалога
+        // ---------------------------------------------------------------------
+        private TabPage BuildPresetTab()
+        {
+            TabPage page = new TabPage("Пресет и объёмы");
+            page.UseVisualStyleBackColor = true;
+
+            GroupBox group = new GroupBox();
+            group.Text = "Пресет (классические BIM-виды)";
+            group.Bounds = new System.Drawing.Rectangle(10, 10, 740, 152);
+            page.Controls.Add(group);
+
+            _radios = new RadioButton[_presets.Length];
+            for (int i = 0; i < _presets.Length; i++)
+            {
+                RadioButton radio = new RadioButton();
+                radio.Text = _presets[i].Caption;
+                radio.Bounds = new System.Drawing.Rectangle(16, 28 + i * 38, 710, 30);
+                radio.Tag = i;
+                radio.CheckedChanged += new EventHandler(OnPresetChanged);
+                group.Controls.Add(radio);
+                _radios[i] = radio;
+            }
+
+            _qto = MakeCheck(page,
+                "Базовые объёмы (QTO): длины, площади и объёмы по стандарту IFC", 178);
+            _tips.SetToolTip(_qto,
+                "IfcElementQuantity (Qto_*BaseQuantities): готовые числа для смет и массы. " +
+                "Включается пресетами DTV и CV2, выключается в RV.");
+
+            _split = MakeCheck(page,
+                "Разрезать стены и колонны по уровням (обычно не нужно)", 210);
+
+            Label spaceLabel = new Label();
+            spaceLabel.Text = "Границы помещений (space boundaries):";
+            spaceLabel.Bounds = new System.Drawing.Rectangle(14, 248, 300, 24);
+            page.Controls.Add(spaceLabel);
+
+            _spaceBoundaries = new ComboBox();
+            _spaceBoundaries.DropDownStyle = ComboBoxStyle.DropDownList;
+            _spaceBoundaries.Bounds = new System.Drawing.Rectangle(320, 246, 190, 24);
+            _spaceBoundaries.Items.Add("0 — не экспортировать");
+            _spaceBoundaries.Items.Add("1 — 1-й уровень");
+            _spaceBoundaries.Items.Add("2 — 2-й уровень");
+            _spaceBoundaries.SelectedIndex = 0;
+            page.Controls.Add(_spaceBoundaries);
+            _tips.SetToolTip(_spaceBoundaries,
+                "IFCExportOptions.SpaceBoundaryLevel: 0 — не экспортировать, 1/2 — уровни границ помещений.");
+
+            Label hint = new Label();
+            hint.Text = "DTV — передача проекта (Tekla/ArchiCAD), RV — референс и показ, " +
+                "CV2 — координация для проектов на IFC2x3.";
+            hint.Bounds = new System.Drawing.Rectangle(14, 292, 730, 44);
+            page.Controls.Add(hint);
+
+            return page;
+        }
+
+        private static CheckBox MakeCheck(Control parent, string text, int top)
+        {
+            CheckBox box = new CheckBox();
+            box.Text = text;
+            box.Bounds = new System.Drawing.Rectangle(14, top, 736, 26);
+            parent.Controls.Add(box);
+            return box;
+        }
+
+        private TabPage BuildContentTab()
+        {
+            TabPage page = new TabPage("Содержимое и геометрия");
+            page.UseVisualStyleBackColor = true;
+
+            Label lodLabel = new Label();
+            lodLabel.Text = "Уровень детализации (тесселяция):";
+            lodLabel.Bounds = new System.Drawing.Rectangle(14, 20, 260, 24);
+            page.Controls.Add(lodLabel);
+
+            _lod = new ComboBox();
+            _lod.DropDownStyle = ComboBoxStyle.DropDownList;
+            _lod.Bounds = new System.Drawing.Rectangle(280, 18, 180, 24);
+            _lod.Items.Add("(не задано)");
+            _lod.Items.Add("Low");
+            _lod.Items.Add("Medium");
+            _lod.Items.Add("High");
+            _lod.SelectedIndex = 0;
+            page.Controls.Add(_lod);
+            _tips.SetToolTip(_lod,
+                "AddOption TessellationLevelOfDetail. Действует для IFC4; для IFC2x3 не передаётся.");
+
+            _linked = MakeCheck(page, "Экспортировать связанные файлы (Revit Links)", 60);
+            _twoD = MakeCheck(page, "Экспортировать 2D-элементы плана", 92);
+            _boundingBox = MakeCheck(page, "Только ограничивающий бокс вместо геометрии", 124);
+            _tips.SetToolTip(_boundingBox, "Файл без тел: полезно для габаритов и проверки размещения.");
+            _rooms = MakeCheck(page, "Экспортировать помещения и пространства", 156);
+
+            Label phaseLabel = new Label();
+            phaseLabel.Text = "Фаза (пусто = все фазы):";
+            phaseLabel.Bounds = new System.Drawing.Rectangle(14, 194, 210, 24);
+            page.Controls.Add(phaseLabel);
+
+            _phase = new TextBox();
+            _phase.Bounds = new System.Drawing.Rectangle(230, 192, 340, 24);
+            page.Controls.Add(_phase);
+            _tips.SetToolTip(_phase, "Имя фазы документа, например «Стадия 2». Пусто — все фазы.");
+
+            _siteElevation = MakeCheck(page, "Отметка площадки (site elevation)", 230);
+            _familyTypeName = MakeCheck(page, "Имя семейства и типа в Reference", 262);
+
+            return page;
+        }
+
+        private TabPage BuildPsetsTab()
+        {
+            TabPage page = new TabPage("PSets и конфиг");
+            page.UseVisualStyleBackColor = true;
+
+            _revitPsets = MakeCheck(page, "Внутренние PSets Revit", 14);
+            _commonPsets = MakeCheck(page, "Общие IFC PSets", 44);
+            _userPsets = MakeCheck(page, "Пользовательские PSets из файла:", 74);
+
+            _userPsetsPath = new TextBox();
+            _userPsetsPath.Bounds = new System.Drawing.Rectangle(34, 102, 610, 24);
+            page.Controls.Add(_userPsetsPath);
+            page.Controls.Add(MakeBrowse(page, 654, 100, new EventHandler(OnBrowseUserPsets)));
+
+            _schedulesAsPsets = MakeCheck(page, "Расписания как PSets (имена через ';'):", 138);
+
+            _schedulesPath = new TextBox();
+            _schedulesPath.Bounds = new System.Drawing.Rectangle(34, 166, 716, 24);
+            page.Controls.Add(_schedulesPath);
+            _tips.SetToolTip(_schedulesPath,
+                "Имена расписаний через ';', например: Ведомость отделки;Спецификация.");
+
+            _storeGuid = MakeCheck(page, "Сохранять IFC GUID в параметрах Revit", 202);
+            _debugKeys = MakeCheck(page, "Проверить ключи AddOption (диагностика в отчёте)", 232);
+
+            Label mapLabel = new Label();
+            mapLabel.Text = "Файл маппинга семейств (пусто = штатная таблица Revit):";
+            mapLabel.Bounds = new System.Drawing.Rectangle(14, 272, 620, 24);
+            page.Controls.Add(mapLabel);
+
+            _mapping = new TextBox();
+            _mapping.Bounds = new System.Drawing.Rectangle(14, 300, 630, 24);
+            page.Controls.Add(_mapping);
+            page.Controls.Add(MakeBrowse(page, 654, 298, new EventHandler(OnBrowse)));
+
+            Label line = new Label();
+            line.BorderStyle = BorderStyle.Fixed3D;
+            line.Bounds = new System.Drawing.Rectangle(14, 340, 740, 2);
+            page.Controls.Add(line);
+
+            _configLabel = new Label();
+            _configLabel.Bounds = new System.Drawing.Rectangle(14, 350, 740, 24);
+            _configLabel.AutoEllipsis = true;
+            page.Controls.Add(_configLabel);
+
+            Button load = new Button();
+            load.Text = "Загрузить…";
+            load.Bounds = new System.Drawing.Rectangle(14, 380, 120, 30);
+            load.Click += new EventHandler(OnLoadConfig);
+            page.Controls.Add(load);
+
+            Button saveAs = new Button();
+            saveAs.Text = "Сохранить как…";
+            saveAs.Bounds = new System.Drawing.Rectangle(142, 380, 160, 30);
+            saveAs.Click += new EventHandler(OnSaveConfigAs);
+            page.Controls.Add(saveAs);
+
+            _saveToFile = new CheckBox();
+            _saveToFile.Text = "Сохранять настройки в файл проекта";
+            _saveToFile.Bounds = new System.Drawing.Rectangle(320, 382, 420, 26);
+            page.Controls.Add(_saveToFile);
+
+            return page;
+        }
+
+        private static Button MakeBrowse(Control parent, int left, int top, EventHandler handler)
+        {
+            Button button = new Button();
+            button.Text = "Обзор…";
+            button.Bounds = new System.Drawing.Rectangle(left, top, 96, 28);
+            button.Click += handler;
+            parent.Controls.Add(button);
+            return button;
         }
 
         private void OnPresetChanged(object sender, EventArgs e)
@@ -1121,6 +1574,32 @@ namespace IvanTools
                 return;
             _qto.Checked = _presets[index].DefaultBaseQuantities;
             _split.Checked = false;
+            SetLod(_presets[index].DefaultLod);
+        }
+
+        private void SetLod(string lod)
+        {
+            string value = lod == null ? "" : lod.Trim();
+            if (value.Length == 0)
+            {
+                _lod.SelectedIndex = 0;
+                return;
+            }
+            for (int i = 1; i < _lod.Items.Count; i++)
+            {
+                if (string.Compare(_lod.Items[i].ToString(), value,
+                        StringComparison.OrdinalIgnoreCase) == 0)
+                {
+                    _lod.SelectedIndex = i;
+                    return;
+                }
+            }
+            _lod.SelectedIndex = 0;
+        }
+
+        private string GetLod()
+        {
+            return _lod.SelectedIndex <= 0 ? "" : _lod.Items[_lod.SelectedIndex].ToString();
         }
 
         // ---------------------------------------------------------------------
@@ -1141,6 +1620,25 @@ namespace IvanTools
             settings.SplitWallsByLevel = _split.Checked;
             settings.MappingFile = _mapping.Text.Trim();
             settings.SaveToFile = _saveToFile.Checked;
+
+            settings.SpaceBoundaryLevel = _spaceBoundaries.SelectedIndex < 0 ? 0 : _spaceBoundaries.SelectedIndex;
+            settings.TesselationLod = GetLod();
+            settings.ExportLinkedFiles = _linked.Checked;
+            settings.Export2DElements = _twoD.Checked;
+            settings.ExportBoundingBox = _boundingBox.Checked;
+            settings.ExportRooms = _rooms.Checked;
+            settings.Phase = _phase.Text.Trim();
+            settings.IncludeSiteElevation = _siteElevation.Checked;
+            settings.UseFamilyTypeName = _familyTypeName.Checked;
+
+            settings.ExportRevitPsets = _revitPsets.Checked;
+            settings.ExportIfcCommonPsets = _commonPsets.Checked;
+            settings.ExportUserPsets = _userPsets.Checked;
+            settings.UserPsetsFile = _userPsetsPath.Text.Trim();
+            settings.ExportSchedulesAsPsets = _schedulesAsPsets.Checked;
+            settings.Schedules = _schedulesPath.Text.Trim();
+            settings.StoreIfcGuid = _storeGuid.Checked;
+            settings.DebugKeys = _debugKeys.Checked;
             return settings;
         }
 
@@ -1177,6 +1675,29 @@ namespace IvanTools
                     _qto.Checked = snapshot.BaseQuantities;
                     _split.Checked = snapshot.SplitWallsByLevel;
                     _mapping.Text = snapshot.MappingFile;
+
+                    int boundaries = snapshot.SpaceBoundaryLevel;
+                    if (boundaries < 0) boundaries = 0;
+                    if (boundaries > 2) boundaries = 2;
+                    _spaceBoundaries.SelectedIndex = boundaries;
+
+                    SetLod(snapshot.TesselationLod);
+                    _linked.Checked = snapshot.ExportLinkedFiles;
+                    _twoD.Checked = snapshot.Export2DElements;
+                    _boundingBox.Checked = snapshot.ExportBoundingBox;
+                    _rooms.Checked = snapshot.ExportRooms;
+                    _phase.Text = snapshot.Phase;
+                    _siteElevation.Checked = snapshot.IncludeSiteElevation;
+                    _familyTypeName.Checked = snapshot.UseFamilyTypeName;
+
+                    _revitPsets.Checked = snapshot.ExportRevitPsets;
+                    _commonPsets.Checked = snapshot.ExportIfcCommonPsets;
+                    _userPsets.Checked = snapshot.ExportUserPsets;
+                    _userPsetsPath.Text = snapshot.UserPsetsFile;
+                    _schedulesAsPsets.Checked = snapshot.ExportSchedulesAsPsets;
+                    _schedulesPath.Text = snapshot.Schedules;
+                    _storeGuid.Checked = snapshot.StoreIfcGuid;
+                    _debugKeys.Checked = snapshot.DebugKeys;
                 }
                 finally
                 {
@@ -1278,6 +1799,23 @@ namespace IvanTools
             }
         }
 
+        private void OnBrowseUserPsets(object sender, EventArgs e)
+        {
+            using (OpenFileDialog open = new OpenFileDialog())
+            {
+                open.Title = "Пользовательские property sets";
+                open.Filter = "Текст (*.txt)|*.txt|Все файлы (*.*)|*.*";
+                string current = _userPsetsPath.Text.Trim();
+                if (current.Length > 0)
+                {
+                    try { open.InitialDirectory = System.IO.Path.GetDirectoryName(current); }
+                    catch { }
+                }
+                if (open.ShowDialog(this) == DialogResult.OK)
+                    _userPsetsPath.Text = open.FileName;
+            }
+        }
+
         private void OnBrowse(object sender, EventArgs e)
         {
             using (OpenFileDialog open = new OpenFileDialog())
@@ -1319,11 +1857,94 @@ namespace IvanTools
         }
     }
     // =========================================================================
+    // Отчёт: свой Form — текст выделяется и копируется (TaskDialog Revit не даёт)
+    // =========================================================================
+    internal sealed class IfcReportDialog : Form
+    {
+        private readonly TextBox _text;
+        private readonly string _folder;
+
+        public IfcReportDialog(string caption, string report, string filePath)
+        {
+            Text = caption;
+            StartPosition = FormStartPosition.CenterScreen;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            AutoScaleMode = AutoScaleMode.Font;
+            ClientSize = new System.Drawing.Size(840, 640);
+            Font = new System.Drawing.Font("Segoe UI", 9f);
+
+            try
+            {
+                _folder = string.IsNullOrEmpty(filePath)
+                    ? null
+                    : System.IO.Path.GetDirectoryName(filePath);
+            }
+            catch { _folder = null; }
+
+            _text = new TextBox();
+            _text.Multiline = true;
+            _text.ReadOnly = true;
+            _text.ScrollBars = ScrollBars.Both;
+            _text.WordWrap = false;
+            _text.Font = new System.Drawing.Font("Consolas", 9f);
+            _text.Bounds = new System.Drawing.Rectangle(12, 12, 816, 578);
+            _text.Text = report;
+            Controls.Add(_text);
+
+            Button copy = new Button();
+            copy.Text = "Копировать";
+            copy.Bounds = new System.Drawing.Rectangle(12, 600, 130, 30);
+            copy.Click += new EventHandler(OnCopy);
+            Controls.Add(copy);
+
+            Button open = new Button();
+            open.Text = "Открыть папку";
+            open.Bounds = new System.Drawing.Rectangle(150, 600, 150, 30);
+            open.Click += new EventHandler(OnOpenFolder);
+            Controls.Add(open);
+
+            Button close = new Button();
+            close.Text = "Закрыть";
+            close.Bounds = new System.Drawing.Rectangle(698, 600, 130, 30);
+            close.DialogResult = DialogResult.OK;
+            Controls.Add(close);
+
+            AcceptButton = close;
+            CancelButton = close;
+        }
+
+        private void OnCopy(object sender, EventArgs e)
+        {
+            try
+            {
+                Clipboard.SetText(_text.Text);
+            }
+            catch
+            {
+            }
+        }
+
+        private void OnOpenFolder(object sender, EventArgs e)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(_folder))
+                    System.Diagnostics.Process.Start("explorer.exe", "\"" + _folder + "\"");
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    // =========================================================================
     // Валидатор STEP: читает файл построчно (IFC бывает 100+ МБ)
     // =========================================================================
     internal sealed class IfcStepSummary
     {
         public string Schema = "";
+        public string ViewDefinition = "";
         public string Header = "";
         public long SizeBytes;
         public int LineCount;
@@ -1356,6 +1977,15 @@ namespace IvanTools
                         if (summary.Schema.Length == 0 &&
                             line.IndexOf("FILE_SCHEMA", StringComparison.OrdinalIgnoreCase) >= 0)
                             summary.Schema = ExtractQuoted(line);
+                        if (summary.ViewDefinition.Length == 0 &&
+                            line.IndexOf("FILE_DESCRIPTION", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            int open = line.IndexOf('[');
+                            int close = open < 0 ? -1 : line.IndexOf(']', open + 1);
+                            if (open >= 0 && close > open)
+                                summary.ViewDefinition =
+                                    line.Substring(open + 1, close - open - 1).Trim();
+                        }
                         if (summary.Header.Length == 0 &&
                             line.IndexOf("FILE_NAME", StringComparison.OrdinalIgnoreCase) >= 0)
                             summary.Header = line.Trim();
@@ -1445,13 +2075,25 @@ namespace IvanTools
             Write("Вид: " + view.Name + " (Id " + view.Id.ToString() + ")");
             Write("Пресет: " + settings.Preset.Caption + " [" + settings.Preset.Version.ToString() + "]");
             Write("QTO: " + settings.BaseQuantities.ToString() +
-                "; Split по уровням: " + settings.SplitWallsByLevel.ToString());
+                "; Split по уровням: " + settings.SplitWallsByLevel.ToString() +
+                "; Space boundaries: " + settings.SpaceBoundaryLevel.ToString());
+            Write("LOD: " + (string.IsNullOrEmpty(settings.TesselationLod) ? "(не задано)" : settings.TesselationLod) +
+                "; links: " + settings.ExportLinkedFiles.ToString() +
+                "; 2D: " + settings.Export2DElements.ToString() +
+                "; bbox: " + settings.ExportBoundingBox.ToString() +
+                "; rooms: " + settings.ExportRooms.ToString() +
+                "; phase: " + (string.IsNullOrEmpty(settings.Phase) ? "(все)" : settings.Phase));
+            Write("PSets: revit=" + settings.ExportRevitPsets.ToString() +
+                ", common=" + settings.ExportIfcCommonPsets.ToString() +
+                ", user=" + settings.ExportUserPsets.ToString() +
+                ", schedules=" + settings.ExportSchedulesAsPsets.ToString() +
+                "; GUID: " + settings.StoreIfcGuid.ToString() +
+                "; debug_keys: " + settings.DebugKeys.ToString());
             Write("Mapping: " + (string.IsNullOrEmpty(settings.MappingFile) ? "(таблица Revit по умолчанию)" : settings.MappingFile));
             Write("Конфиг: " + (string.IsNullOrEmpty(settings.ConfigInfo) ? "(не найден — значения по умолчанию)" : settings.ConfigInfo));
             if (settings.ConfigErrors.Count > 0)
                 Write("Конфиг-замечания: " + string.Join(" | ", settings.ConfigErrors.ToArray()));
-            foreach (KeyValuePair<string, string> extra in settings.ExtraOptions)
-                Write("AddOption: " + extra.Key + " = " + extra.Value);
+            Write("Сборка: " + typeof(ExportToIfc).Assembly.Location);
             Write("Файл: " + targetPath);
         }
 
