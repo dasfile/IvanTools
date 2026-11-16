@@ -118,6 +118,13 @@ namespace IvanTools
             // IFC GUID сохраняются в модели и остаются стабильными между экспортами.
             using (Transaction transaction = new Transaction(doc, "Экспорт IFC"))
             {
+                // Предупреждения экспортёра (например «элемент без IFC-класса») не должны
+                // останавливать прогон модальным окном; ошибки остаются как есть.
+                FailureHandlingOptions failureOptions = transaction.GetFailureHandlingOptions();
+                failureOptions.SetFailuresPreprocessor(new IfcWarningsSilencer());
+                failureOptions.SetClearAfterRollback(true);
+                transaction.SetFailureHandlingOptions(failureOptions);
+
                 try
                 {
                     transaction.Start();
@@ -957,6 +964,25 @@ namespace IvanTools
                 return relative;
             }
             catch { return fullPath; }
+        }
+    }
+
+    // =========================================================================
+    // Экспорт IFC: предупреждения Revit не должны прерывать прогон
+    // =========================================================================
+    internal sealed class IfcWarningsSilencer : IFailuresPreprocessor
+    {
+        public FailureProcessingResult PreprocessFailures(FailuresAccessor failures)
+        {
+            try
+            {
+                failures.DeleteAllWarnings();
+            }
+            catch
+            {
+            }
+            // Ошибки не разрешаем и не удаляем: они должны дойти до пользователя
+            return FailureProcessingResult.Continue;
         }
     }
 
