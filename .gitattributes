@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+# Windows-only scripts, if ever added, must keep CRLF
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Binaries: never touch line endings
+*.png   binary
+*.dll   binary
+*.zip   binary

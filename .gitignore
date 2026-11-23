@@ -1,0 +1,21 @@
+# Build / release output
+dist/
+obj/
+*.dll
+*.pdb
+*.bak
+*.old
+*.old[0-9]*
+
+# Deprecated / archived sources and assets
+deprecated/
+
+# Local plugin settings
+IvanTools.ini
+
+# IDE / OS junk
+.vs/
+*.user
+*.suo
+Thumbs.db
+desktop.ini

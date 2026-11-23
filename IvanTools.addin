@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+  <!-- Sheets: batch renumbering of selected sheets with "General Data" priority -->
+  <AddIn Type="Command">
+    <Name>IvanTools - Renumber Sheets</Name>
+    <FullClassName>IvanTools.RenumberSheets</FullClassName>
+    <Assembly>.\IvanTools\SheetsBatchRenum.dll</Assembly>
+    <AddInId>50280453-0000-4e32-88e2-48c4ad6e4e3b</AddInId>
+    <VendorId>RODIONOV</VendorId>
+    <VendorDescription>Ivan Rodionov, Architectural Engineer</VendorDescription>
+    <ToolTip>Batch renumbering of sheets with "General Data" priority.</ToolTip>
+  </AddIn>
+
+  <!-- Walls: split a compound wall into single-layer walls, keep hosted elements -->
+  <AddIn Type="Command">
+    <Name>IvanTools - Split Wall</Name>
+    <FullClassName>IvanTools.SplitWall</FullClassName>
+    <Assembly>.\IvanTools\SplitWall.dll</Assembly>
+    <AddInId>A1B2C3D4-E5F6-4321-8765-AABBCCDDEEFF</AddInId>
+    <VendorId>RODIONOV</VendorId>
+    <VendorDescription>Ivan Rodionov, Architectural Engineer</VendorDescription>
+    <ToolTip>Split a multi-layer wall into single-layer walls.</ToolTip>
+  </AddIn>
+
+  <!-- Floors and roofs: align shape-edited vertices to a picked planar face -->
+  <AddIn Type="Command">
+    <Name>IvanTools - Adjust to Face</Name>
+    <FullClassName>IvanTools.AdjustToFace</FullClassName>
+    <Assembly>.\IvanTools\AdjustToFace.dll</Assembly>
+    <AddInId>aace0286-f1f7-4df6-bdf7-2cfca2a4b4ed</AddInId>
+    <VendorId>RODIONOV</VendorId>
+    <VendorDescription>Ivan Rodionov, Architectural Engineer</VendorDescription>
+    <ToolTip>Align shape-edited floor or roof vertices to the plane of a picked face.</ToolTip>
+  </AddIn>
+
+  <!-- Export the active 3D view to glTF Binary (.glb) -->
+  <AddIn Type="Command">
+    <Name>IvanTools - Export to GLB</Name>
+    <FullClassName>IvanTools.ExportToGlb</FullClassName>
+    <Assembly>.\IvanTools\ExportToGlb.dll</Assembly>
+    <AddInId>8F2A6C41-3D7B-4E62-9A15-6B0C7E4D2F58</AddInId>
+    <VendorId>RODIONOV</VendorId>
+    <VendorDescription>Ivan Rodionov, Architectural Engineer</VendorDescription>
+    <ToolTip>Export geometry and materials of the active 3D view to glTF Binary (.glb).</ToolTip>
+  </AddIn>
+
+  <!-- Hot reload: compile and run a .cs script without restarting Revit -->
+  <AddIn Type="Command">
+    <Name>IvanTools - Hot Loader</Name>
+    <FullClassName>IvanTools.HotLoader</FullClassName>
+    <Assembly>.\IvanTools\CsHotLoader.dll</Assembly>
+    <AddInId>C0A5E7B4-3F21-4C8D-9A62-1D8E5F0B7A31</AddInId>
+    <VendorId>RODIONOV</VendorId>
+    <VendorDescription>Ivan Rodionov, Architectural Engineer</VendorDescription>
+    <ToolTip>Pick a .cs file, compile and run it without restarting Revit.</ToolTip>
+  </AddIn>
+
+  <!-- Hot reload: rerun the last script without picking a file -->
+  <AddIn Type="Command">
+    <Name>IvanTools - Hot Loader Rerun</Name>
+    <FullClassName>IvanTools.HotLoaderRerun</FullClassName>
+    <Assembly>.\IvanTools\CsHotLoader.dll</Assembly>
+    <AddInId>5E2B9C13-7A44-4D18-B6F0-2C9A8D7E4B51</AddInId>
+    <VendorId>RODIONOV</VendorId>
+    <VendorDescription>Ivan Rodionov, Architectural Engineer</VendorDescription>
+    <ToolTip>Run the last script again without picking a file.</ToolTip>
+  </AddIn>
+
+  <!-- Rooms: click rooms one by one to assign incrementing numbers -->
+  <AddIn Type="Command">
+    <Name>IvanTools - Room Counter</Name>
+    <FullClassName>IvanTools.RoomCounter</FullClassName>
+    <Assembly>.\IvanTools\RoomCounter.dll</Assembly>
+    <AddInId>7D3C1B2A-4E5F-4A6B-8C9D-0E1F2A3B4C5D</AddInId>
+    <VendorId>RODIONOV</VendorId>
+    <VendorDescription>Ivan Rodionov, Architectural Engineer</VendorDescription>
+    <ToolTip>Assign incrementing numbers to rooms by clicking them.</ToolTip>
+  </AddIn>
+</RevitAddIns>

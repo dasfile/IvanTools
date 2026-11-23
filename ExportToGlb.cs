@@ -1,33 +1,33 @@
-﻿// =============================================================================
-// ExportToGlb — экспорт активного 3D-вида Revit 2023 в glTF 2.0 (.glb)
 // =============================================================================
-// Из активного View3D собирается треугольная геометрия (IExportContext через
-// CustomExporter), материалы PBR (цвет / текстура / прозрачность / гладкость /
-// металличность) и дерево нод по элементам модели. Запись .glb выполняется
-// собственным минимальным писателем glTF 2.0 — без внешних NuGet-библиотек.
+// ExportToGlb - export the active Revit 2023 3D view to glTF 2.0 (.glb)
+// =============================================================================
+// Triangular geometry is collected from the active View3D (IExportContext via
+// CustomExporter), together with PBR materials (color / texture / transparency /
+// glossiness / metallic) and a node tree per model element. The .glb file is
+// written by a minimal built-in glTF 2.0 writer - no external NuGet libraries.
 //
 // Environment : Autodesk Revit 2023 (.NET Framework 4.8), C# 5
 //
-// Особенности реализации:
-//   - IncludeGeometricObjects = false: колбэки граней (OnFaceBegin/OnFaceEnd)
-//     не приходят вовсе, но триангуляция всё равно приходит в OnPolymesh.
-//     Это документированное поведение и ускорение экспорта, а не ошибка.
-//   - Section Box, скрытые категории/элементы и фазы учитывает сам Revit:
-//     экспортируется ровно то, что видно на виде.
-//   - Оси: вершины остаются в футах Revit, переход "Z-up, футы" -> "Y-up, метры"
-//     выполняется матрицей на корневой ноде BasisTransform:
+// Implementation notes:
+//   - IncludeGeometricObjects = false: face callbacks (OnFaceBegin/OnFaceEnd)
+//     never arrive, but triangulation still arrives in OnPolymesh.
+//     This is documented behavior and an export speed-up, not a bug.
+//   - Section Box, hidden categories/elements and phases are handled by Revit:
+//     exactly what is visible in the view gets exported.
+//   - Axes: vertices stay in Revit feet; the "Z-up, feet" -> "Y-up, meters"
+//     conversion is a matrix on the root BasisTransform node:
 //         p' = (0.3048*x, 0.3048*z, -0.3048*y)
-//     Определитель +1 => порядок обхода треугольников НЕ инвертируется.
-//   - UV: V' = -V (а не 1-V: иначе ломается тайлинг при UV вне [0..1]).
-//     Диапазон UV в документации Revit не определён, поэтому плагин пишет
-//     отладочный лог %TEMP%\ExportToGlb_uv.log (первые 30 полимешей) —
-//     по нему принимается решение о необходимости RealWorldScale.
-//   - Ошибка на отдельном элементе не отменяет экспорт: собираются warnings.
+//     Determinant +1 => triangle winding order is NOT inverted.
+//   - UV: V' = -V (not 1-V: otherwise tiling breaks for UV outside [0..1]).
+//     The UV range is not defined in the Revit documentation, so the plugin
+//     writes a debug log %TEMP%\ExportToGlb_uv.log (first 30 polymeshes) -
+//     it is used to decide whether RealWorldScale is needed.
+//   - An error on a single element does not cancel the export: warnings are collected.
 //
-// Запуск:
-//   1) через CsHotLoader (Run Script) — положить этот .cs в
+// Running:
+//   1) via IvanTools.HotLoader (Run Script) - put this .cs into
 //      C:\ProgramData\Autodesk\Revit\Addins\2023\IvanTools\
-//   2) либо собрать ExportToGlb.dll и добавить блок <AddIn> в IvanTools.addin:
+//   2) or compile ExportToGlb.dll and add an <AddIn> entry to IvanTools.addin:
 //      csc /target:library /out:ExportToGlb.dll ^
 //          /reference:"%ProgramFiles%\Autodesk\Revit 2023\RevitAPI.dll" ^
 //          /reference:"%ProgramFiles%\Autodesk\Revit 2023\RevitAPIUI.dll" ^
@@ -35,7 +35,7 @@
 //          /reference:System.Windows.Forms.dll ExportToGlb.cs
 //
 // Credits:
-//   Ivan Rodionov — идея, постановка задачи, тестирование
+//   Ivan Rodionov - idea, requirements, testing
 //
 // License: MIT
 // =============================================================================
@@ -65,8 +65,8 @@ namespace IvanTools
             UIDocument uidoc = uiapp.ActiveUIDocument;
             if (uidoc == null)
             {
-                TaskDialog.Show("IvanTools — Export To GLB",
-                    "Нет активного документа.");
+                TaskDialog.Show("IvanTools - Export to GLB",
+                    "No active document.");
                 return Result.Cancelled;
             }
 
@@ -74,9 +74,9 @@ namespace IvanTools
             View3D view3d = uidoc.ActiveView as View3D;
             if (view3d == null || view3d.IsTemplate)
             {
-                TaskDialog.Show("IvanTools — Export To GLB",
-                    "Активный вид не является 3D-видом (или это шаблон вида).\n\n" +
-                    "Откройте 3D-вид (например, {3D}) и запустите команду снова.");
+                TaskDialog.Show("IvanTools - Export to GLB",
+                    "The active view is not a 3D view (or it is a view template).\n\n" +
+                    "Open a 3D view (for example {3D}) and run the command again.");
                 return Result.Cancelled;
             }
 
@@ -84,7 +84,7 @@ namespace IvanTools
             string path;
             using (System.Windows.Forms.SaveFileDialog dlg = new System.Windows.Forms.SaveFileDialog())
             {
-                dlg.Title = "Экспорт активного 3D-вида в GLB";
+                dlg.Title = "Export the active 3D view to GLB";
                 dlg.Filter = "glTF Binary (*.glb)|*.glb";
                 dlg.DefaultExt = "glb";
                 dlg.AddExtension = true;
@@ -108,24 +108,24 @@ namespace IvanTools
 
                 if (ctx.Scene.TriangleCount == 0)
                 {
-                    TaskDialog.Show("IvanTools — Export To GLB",
-                        "В виде не найдено ни одного треугольника.\n\n" +
-                        "Вид в режиме «Каркас» не даёт граней: переключите вид на\n" +
-                        "«Скрытая линия», «Заливка» или «Реалистичный» и повторите экспорт.\n\n" +
-                        "Файл не создан.");
+                    TaskDialog.Show("IvanTools - Export to GLB",
+                        "No triangles found in the view.\n\n" +
+                        "A view in Wireframe mode produces no faces: switch the view to\n" +
+                        "Hidden Line, Shaded or Realistic and run the export again.\n\n" +
+                        "The file was not created.");
                     return Result.Cancelled;
                 }
 
                 ctx.Scene.WriteTo(path);
                 double seconds = (DateTime.Now - started).TotalSeconds;
-                TaskDialog.Show("IvanTools — Export To GLB", BuildReport(path, ctx.Scene, seconds));
+                TaskDialog.Show("IvanTools - Export to GLB", BuildReport(path, ctx.Scene, seconds));
                 return Result.Succeeded;
             }
             catch (Exception ex)
             {
                 message = ex.Message;
-                TaskDialog.Show("IvanTools — Export To GLB",
-                    "Экспорт прерван ошибкой:\n\n" + ex.ToString());
+                TaskDialog.Show("IvanTools - Export to GLB",
+                    "Export aborted with an error:\n\n" + ex.ToString());
                 return Result.Failed;
             }
         }
@@ -137,37 +137,37 @@ namespace IvanTools
             catch { size = 0; }
 
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("Файл: " + path);
-            sb.AppendLine("Размер: " + (size / 1024.0 / 1024.0).ToString("0.00", CultureInfo.InvariantCulture) +
-                " МБ (" + size.ToString() + " Б)");
-            sb.AppendLine("Время: " + seconds.ToString("0.0", CultureInfo.InvariantCulture) + " с");
+            sb.AppendLine("File: " + path);
+            sb.AppendLine("Size: " + (size / 1024.0 / 1024.0).ToString("0.00", CultureInfo.InvariantCulture) +
+                " MB (" + size.ToString() + " bytes)");
+            sb.AppendLine("Time: " + seconds.ToString("0.0", CultureInfo.InvariantCulture) + " s");
             sb.AppendLine();
-            sb.AppendLine("Элементов: " + scene.ElementCount.ToString() +
-                " (без геометрии: " + scene.ElementsWithoutGeometry.ToString() + ")");
-            sb.AppendLine("Мешей: " + scene.Meshes.Count.ToString());
-            sb.AppendLine("Примитивов: " + scene.PrimitiveCount.ToString());
-            sb.AppendLine("Треугольников: " + scene.TriangleCount.ToString());
-            sb.AppendLine("Материалов: " + scene.Materials.Count.ToString() +
-                " (с текстурой: " + scene.MaterialsWithTexture.ToString() +
-                ", плоский цвет: " + scene.MaterialsFlatColor.ToString() + ")");
-            sb.AppendLine("Текстур встроено: " + scene.Images.Count.ToString() +
-                " (не найдено: " + scene.TexturesMissing.ToString() + ")");
+            sb.AppendLine("Elements: " + scene.ElementCount.ToString() +
+                " (without geometry: " + scene.ElementsWithoutGeometry.ToString() + ")");
+            sb.AppendLine("Meshes: " + scene.Meshes.Count.ToString());
+            sb.AppendLine("Primitives: " + scene.PrimitiveCount.ToString());
+            sb.AppendLine("Triangles: " + scene.TriangleCount.ToString());
+            sb.AppendLine("Materials: " + scene.Materials.Count.ToString() +
+                " (with texture: " + scene.MaterialsWithTexture.ToString() +
+                ", flat color: " + scene.MaterialsFlatColor.ToString() + ")");
+            sb.AppendLine("Embedded textures: " + scene.Images.Count.ToString() +
+                " (missing: " + scene.TexturesMissing.ToString() + ")");
 
             if (scene.Warnings.Count > 0)
             {
                 sb.AppendLine();
-                sb.AppendLine("Предупреждения (" + scene.Warnings.Count.ToString() + "):");
+                sb.AppendLine("Warnings (" + scene.Warnings.Count.ToString() + "):");
                 int max = scene.Warnings.Count < 10 ? scene.Warnings.Count : 10;
                 for (int i = 0; i < max; i++)
-                    sb.AppendLine("  • " + scene.Warnings[i]);
+                    sb.AppendLine("  - " + scene.Warnings[i]);
                 if (scene.Warnings.Count > max)
-                    sb.AppendLine("  … и ещё " + (scene.Warnings.Count - max).ToString());
+                    sb.AppendLine("  ... and " + (scene.Warnings.Count - max).ToString() + " more");
             }
 
             return sb.ToString();
         }
 
-        // Имя файла / имя ноды: без переводов строк и символов, ломающих XML/JSON
+        // File name / node name: no line breaks or characters that break XML/JSON
         internal static string Sanitize(string value)
         {
             if (string.IsNullOrEmpty(value))
@@ -192,11 +192,11 @@ namespace IvanTools
         }
     }
     // =========================================================================
-    // IExportContext: обход сцены Revit
+    // IExportContext: walking the Revit scene
     // =========================================================================
     internal sealed class GlbExportContext : IExportContext
     {
-        // Перевод футов Revit в метры (единицы glTF)
+        // Revit feet to meters (glTF units)
         internal const double FeetToMeters = 0.3048;
 
         private readonly Document _doc;
@@ -237,7 +237,7 @@ namespace IvanTools
         }
 
         // ---------------------------------------------------------------------
-        // Служебные колбэки
+        // Service callbacks
         // ---------------------------------------------------------------------
         public bool Start()
         {
@@ -249,8 +249,8 @@ namespace IvanTools
             _elements.Clear();
             _nodePath.Clear();
 
-            // Корневая нода: футы -> метры и Z-up -> Y-up одной матрицей.
-            // glTF хранит матрицы по столбцам; определитель = +1 (winding не меняется).
+            // Root node: feet -> meters and Z-up -> Y-up in a single matrix.
+            // glTF stores matrices column-major; determinant = +1 (winding is unchanged).
             float h = (float)FeetToMeters;
             GlbNode basis = new GlbNode("BasisTransform");
             basis.Matrix = new float[]
@@ -273,8 +273,8 @@ namespace IvanTools
             _scene.EndTime = DateTime.Now;
         }
 
-        // Прогресс/отмена: у CustomExporter нет колбэков прогресса; возврат true
-        // здесь прерывает экспорт (в текущей версии отмены из UI нет).
+        // Progress/cancel: CustomExporter has no progress callbacks; returning true
+        // here aborts the export (there is no UI cancel in the current version).
         public bool IsCanceled()
         {
             return _canceled;
@@ -290,7 +290,7 @@ namespace IvanTools
         }
 
         // ---------------------------------------------------------------------
-        // Элементы
+        // Elements
         // ---------------------------------------------------------------------
         public RenderNodeAction OnElementBegin(ElementId elementId)
         {
@@ -319,7 +319,7 @@ namespace IvanTools
                 ElementState state = _elements[_elements.Count - 1];
                 _elements.RemoveAt(_elements.Count - 1);
 
-                // Пустой меш (элемент целиком за Section Box / без граней) не пишем
+                // An empty mesh (element fully outside the Section Box / no faces) is skipped
                 if (!state.Mesh.HasGeometry())
                 {
                     _scene.ElementsWithoutGeometry++;
@@ -357,19 +357,19 @@ namespace IvanTools
             }
             catch
             {
-                // имя — не повод прерывать экспорт
+                // a name is not a reason to abort the export
             }
 
             return ExportToGlb.Sanitize(category + "_" + name + "_" + id.ToString());
         }
         // ---------------------------------------------------------------------
-        // Вхождения (трансформации) и связи
+        // Instances (transformations) and links
         // ---------------------------------------------------------------------
         public RenderNodeAction OnInstanceBegin(InstanceNode node)
         {
             try
             {
-                // GetTransform() объявлен в базовом GroupNode (общий для InstanceNode и LinkNode)
+                // GetTransform() is declared on the base GroupNode (shared by InstanceNode and LinkNode)
                 _transforms.Add(CurrentTransform.Multiply(node.GetTransform()));
             }
             catch (Exception ex)
@@ -395,7 +395,7 @@ namespace IvanTools
                 Document linkDoc = node.GetDocument();
                 _docs.Add(linkDoc != null ? linkDoc : CurrentDoc);
 
-                // Группирующая нода связи: элементы связи будут её детьми
+                // Grouping node for the link: link elements become its children
                 string linkName = "Link";
                 try
                 {
@@ -444,11 +444,11 @@ namespace IvanTools
                 _scene.Warnings.Add(text);
         }
         // ---------------------------------------------------------------------
-        // Грани, материалы, полимеши
+        // Faces, materials, polymeshes
         // ---------------------------------------------------------------------
         public RenderNodeAction OnFaceBegin(FaceNode node)
         {
-            // При IncludeGeometricObjects = false этот метод не вызывается вовсе
+            // With IncludeGeometricObjects = false this method is never called
             return RenderNodeAction.Proceed;
         }
 
@@ -511,7 +511,7 @@ namespace IvanTools
             int baseIndex = prim.Positions.Count / 3;
             Dictionary<long, int> vertexMap = new Dictionary<long, int>();
 
-            // Этап 0: замер диапазона UV (см. PLAN.md §8)
+            // Stage 0: measure the UV range (see PLAN.md section 8)
             if (_uvProbeCount < UvProbe.MaxPolymeshes)
             {
                 UvProbe.Log(state.Mesh.Name, node, xf, material);
@@ -529,7 +529,7 @@ namespace IvanTools
                 XYZ p1 = xf.OfPoint(node.GetPoint(i1));
                 XYZ p2 = xf.OfPoint(node.GetPoint(i2));
 
-                // Вырожденные треугольники появляются при обрезке Section Box
+                // Degenerate triangles appear when clipped by the Section Box
                 XYZ cross = (p1 - p0).CrossProduct(p2 - p0);
                 if (cross.DotProduct(cross) <= 1e-12)
                     continue;
@@ -547,7 +547,7 @@ namespace IvanTools
                 _scene.TriangleCount++;
             }
         }
-        // Одна вершина примитива на уникальную комбинацию (точка, нормаль, UV)
+        // One primitive vertex per unique combination of (point, normal, UV)
         private static int GetVertexIndex(
             GlbPrimitive prim,
             GlbMaterial material,
@@ -617,8 +617,8 @@ namespace IvanTools
             if (prim.HasUv)
             {
                 UV uv = node.GetUV(uvIndex);
-                // Revit отдаёт UV в футах: делим на реальный размер тайла (RealWorldScale),
-                // учитываем повтор; V инвертируем (origin текстуры в glTF сверху).
+                // Revit returns UV in feet: divide by the real tile size (RealWorldScale),
+                // apply the repeat, and invert V (glTF texture origin is at the top).
                 prim.Uvs.Add((float)(uv.U * material.UvMulU));
                 prim.Uvs.Add((float)(-uv.V * material.UvMulV));
             }
@@ -629,7 +629,7 @@ namespace IvanTools
         }
     }
 
-    // Состояние сборки меша текущего элемента (по одному примитиву на материал)
+    // Mesh assembly state of the current element (one primitive per material)
     internal sealed class ElementState
     {
         public GlbMesh Mesh;
@@ -651,12 +651,12 @@ namespace IvanTools
         }
     }
     // =========================================================================
-    // Материалы: цвет, текстура, прозрачность, гладкость, металличность
+    // Materials: color, texture, transparency, glossiness, metallic
     // =========================================================================
     internal sealed class MaterialLibrary
     {
-        // Ключи ассетов Revit: значение проверяется по факту (см. PLAN.md §7.2),
-        // поэтому перебираем известные варианты, а не полагаемся на один.
+        // Revit asset keys: values are verified in practice (see PLAN.md section 7.2),
+        // so known variants are enumerated instead of relying on a single one.
         private static readonly string[] DiffuseKeys =
         {
             "generic_diffuse", "wallpaint_color", "masonrycmu_color", "metal_color",
@@ -669,11 +669,11 @@ namespace IvanTools
             "unifiedbitmap_Bitmap", "unifiedbitmap_bitmap", "bitmap"
         };
 
-        // Цвет Revit — sRGB, а glTF baseColorFactor задаётся в линейном пространстве.
-        // Без конвертации модель выглядит светлее и «вымыто» (нежнее/голубее).
+        // Revit color is sRGB, while the glTF baseColorFactor is linear.
+        // Without conversion the model looks lighter and washed out (paler/bluer).
         private const bool ConvertSrgbToLinear = true;
 
-        // Ключи масштаба/повтора текстуры в ассете UnifiedBitmap
+        // Texture scale/repeat keys in the UnifiedBitmap asset
         private const string KeyScaleU = "texture_RealWorldScaleX";
         private const string KeyScaleV = "texture_RealWorldScaleY";
         private const string KeyRepeatU = "texture_URepeat";
@@ -728,8 +728,8 @@ namespace IvanTools
             bool isDefault = node.MaterialId == ElementId.InvalidElementId;
             string alphaKey = alpha.ToString("0.###", CultureInfo.InvariantCulture);
 
-            // Цвет входит в ключ кэша: один материал может быть переопределён в виде
-            // разными цветами на разных элементах (фильтры/переопределения V/G).
+            // Color is part of the cache key: one material may be overridden in the view
+            // with different colors on different elements (filters / V/G overrides).
             string colorKey = nodeColor == null
                 ? "nc"
                 : nodeColor.Red.ToString(CultureInfo.InvariantCulture) + "_" +
@@ -760,12 +760,12 @@ namespace IvanTools
             m.Roughness = 0.5f;
             m.ImageIndex = -1;
 
-            // ---- Правило выбора цвета ------------------------------------------------
+            // ---- Color selection rule ------------------------------------------------
             // Revit (Material.UseRenderAppearanceForShading):
-            //   true  -> закрашенный вид строится по render appearance (текстура);
-            //   false -> по цвету и прозрачности материала, текстура НЕ используется.
-            // Если брать текстуру всегда, «ярко-красный бетон» с выключенной отделкой
-            // становится серым (регрессия, замеченная на лестнице).
+            //   true  -> the shaded view is built from the render appearance (texture);
+            //   false -> from the material color and transparency, the texture is NOT used.
+            // Taking the texture always makes "bright red concrete" with finishing turned off
+            // turn gray (a regression noticed on a staircase).
             Material element = null;
             try
             {
@@ -827,7 +827,7 @@ namespace IvanTools
                 try { title = asset.Title; }
                 catch { title = null; }
 
-                // Гладкость -> шероховатость (документированный диапазон 0..1)
+                // Glossiness -> roughness (documented range 0..1)
                 try
                 {
                     AssetPropertyDouble glossiness = asset.FindByName("generic_glossiness") as AssetPropertyDouble;
@@ -838,7 +838,7 @@ namespace IvanTools
                 {
                 }
 
-                // Металличность: канал metal_color либо флаг generic_is_metal
+                // Metallic: the metal_color channel or the generic_is_metal flag
                 try
                 {
                     if (asset.FindByName("metal_color") != null)
@@ -856,7 +856,7 @@ namespace IvanTools
                 {
                 }
 
-                // Текстура — только если вид строится по отделке (см. правило выше)
+                // Texture - only if the view is built from finishing (see the rule above)
                 if (useAppearance)
                 {
                     try
@@ -899,7 +899,7 @@ namespace IvanTools
             _scene.Materials.Add(m);
             return m;
         }
-        // Текстура + её реальный масштаб/повтор и тинт из ассета UnifiedBitmap
+        // Texture plus its real scale/repeat and tint from the UnifiedBitmap asset
         private TextureInfo TryApplyTexture(Asset rootAsset, GlbMaterial m)
         {
             TextureInfo info = new TextureInfo();
@@ -933,8 +933,8 @@ namespace IvanTools
                 m.ImageIndex = imageIndex;
                 info.Found = true;
 
-                // Тинт текстуры: в Revit цвет умножается на картинку,
-                // без этого «красный бетон» становится серым.
+                // Texture tint: in Revit the color is multiplied by the image;
+                // without this "red concrete" turns gray.
                 info.TintEnabled = ReadBool(connected, "common_tint_toggle", false) ||
                                    ReadBool(rootAsset, "common_tint_toggle", false);
                 if (info.TintEnabled)
@@ -957,7 +957,7 @@ namespace IvanTools
                     m.B = 1f;
                 }
 
-                // Revit отдаёт UV в футах, поэтому тайл = RealWorldScale (футы)
+                // Revit returns UV in feet, so the tile is RealWorldScale (feet)
                 float scaleU = ReadDistance(connected, KeyScaleU, 1f);
                 float scaleV = ReadDistance(connected, KeyScaleV, 1f);
                 float repeatU = ReadNumber(connected, KeyRepeatU, 1f);
@@ -970,7 +970,7 @@ namespace IvanTools
             return info;
         }
 
-        // В AssetPropertyString Revit хранит несколько вариантов пути через '|'
+        // In AssetPropertyString Revit stores several path variants separated by '|'
         private static List<string> GetBitmapPaths(Asset asset)
         {
             List<string> result = new List<string>();
@@ -993,7 +993,7 @@ namespace IvanTools
             return result;
         }
 
-        // Смешанные слеши ("Textures\/1/Mats/..."), двойные разделители, лишние пробелы
+        // Mixed slashes ("Textures\/1/Mats/..."), double separators, extra spaces
         private static string NormalizePathCandidate(string value)
         {
             if (string.IsNullOrEmpty(value))
@@ -1062,7 +1062,7 @@ namespace IvanTools
             return fallback;
         }
 
-        // common_tint_color — AssetPropertyDoubleArray4d (RGBA)
+        // common_tint_color - AssetPropertyDoubleArray4d (RGBA)
         private static Color ReadColor(Asset asset, string key)
         {
             try
@@ -1142,8 +1142,8 @@ namespace IvanTools
             return index;
         }
 
-        // Абсолютный путь принимается как есть, иначе ищется файл с тем же именем
-        // в библиотеке текстур Autodesk (%ProgramFiles(x86)%\Common Files\Autodesk Shared\...)
+        // An absolute path is accepted as is; otherwise a file with the same name is
+        // searched for in the Autodesk texture library (%ProgramFiles(x86)%\Common Files\Autodesk Shared\...)
         private string ResolveImagePath(string candidate)
         {
             if (string.IsNullOrEmpty(candidate))
@@ -1196,7 +1196,7 @@ namespace IvanTools
             return null;
         }
 
-        // Один обход библиотеки текстур на экспорт: поиск по имени файла без диска на каждый материал
+        // A single texture library scan per export: lookup by file name without touching the disk for each material
         private Dictionary<string, string> TextureIndexByName
         {
             get
@@ -1254,7 +1254,7 @@ namespace IvanTools
             }
         }
 
-        // glTF 2.0 поддерживает только PNG и JPEG: остальное конвертируем в PNG
+        // glTF 2.0 supports PNG and JPEG only: everything else is converted to PNG
         private static bool TryLoadImage(string path, out byte[] data, out string mimeType)
         {
             data = null;
@@ -1294,12 +1294,12 @@ namespace IvanTools
             _missing[rawPath] = true;
             _scene.TexturesMissing++;
             if (_scene.Warnings.Count < 200)
-                _scene.Warnings.Add("Текстура не найдена: " + rawPath);
+                _scene.Warnings.Add("Texture not found: " + rawPath);
         }
     }
 
     // =========================================================================
-    // Данные сцены (вместо кортежей — отдельные классы: C# 5)
+    // Scene data (separate classes instead of tuples: C# 5)
     // =========================================================================
     internal sealed class GlbScene
     {
@@ -1399,7 +1399,7 @@ namespace IvanTools
         public bool Blend;
         public int ImageIndex = -1;
 
-        // Множители UV: repeat / RealWorldScale (Revit отдаёт UV в футах)
+        // UV multipliers: repeat / RealWorldScale (Revit returns UV in feet)
         public float UvMulU = 1f;
         public float UvMulV = 1f;
     }
@@ -1410,7 +1410,7 @@ namespace IvanTools
         public string MimeType = "image/png";
     }
 
-    // Результат поиска текстуры для материала (правило цвета + диагностика)
+    // Result of the texture search for a material (color rule + diagnostics)
     internal sealed class TextureInfo
     {
         public string DiffuseKey = "-";
@@ -1420,7 +1420,7 @@ namespace IvanTools
         public Color Tint;
     }
 
-    // Диагностика материалов: %TEMP%\ExportToGlb_materials.log
+    // Material diagnostics: %TEMP%\ExportToGlb_materials.log
     internal static class MaterialProbe
     {
         private static string _path;
@@ -1431,7 +1431,7 @@ namespace IvanTools
             {
                 _path = Path.Combine(Path.GetTempPath(), "ExportToGlb_materials.log");
                 File.WriteAllText(_path,
-                    "ExportToGlb: материалы (id; имя; Material.Color; node.Color; UseRenderAppearance; " +
+                    "ExportToGlb: materials (id; name; Material.Color; node.Color; UseRenderAppearance; " +
                     "colorOverridden; transparency; HasOverriddenAppearance; asset; diffuseKey; candidates; " +
                     "texture; decision; linearRGB)" + Environment.NewLine);
             }
@@ -1457,7 +1457,7 @@ namespace IvanTools
     }
 
     // =========================================================================
-    // Этап 0: замер UV (PLAN.md §8). Лог: %TEMP%\ExportToGlb_uv.log
+    // Stage 0: UV measurement (PLAN.md section 8). Log: %TEMP%\ExportToGlb_uv.log
     // =========================================================================
     internal static class UvProbe
     {
@@ -1472,7 +1472,7 @@ namespace IvanTools
             {
                 _path = Path.Combine(Path.GetTempPath(), "ExportToGlb_uv.log");
                 File.WriteAllText(_path,
-                    "ExportToGlb: замер UV (элемент; точки; UV; minU; maxU; minV; maxV; габарит полимеша, фут; UvMulU; UvMulV)" +
+                    "ExportToGlb: UV measurement (element; points; UV; minU; maxU; minV; maxV; polymesh extent, feet; UvMulU; UvMulV)" +
                     Environment.NewLine);
             }
             catch
@@ -1500,7 +1500,7 @@ namespace IvanTools
                     if (uv.V > maxV) maxV = uv.V;
                 }
 
-                // Габарит полимеша: показывает, растут ли UV вместе с размером грани
+                // Polymesh extent: shows whether UV grow together with the face size
                 XYZ min = new XYZ(double.MaxValue, double.MaxValue, double.MaxValue);
                 XYZ max = new XYZ(double.MinValue, double.MinValue, double.MinValue);
                 for (int i = 0; i < node.NumberOfPoints; i++)
@@ -1524,12 +1524,12 @@ namespace IvanTools
             }
             catch
             {
-                // лог не должен ломать экспорт
+                // logging must not break the export
             }
         }
     }
     // =========================================================================
-    // Запись GLB (glTF 2.0, binary): контейнер + JSON + BIN
+    // GLB writing (glTF 2.0, binary): container + JSON + BIN
     // =========================================================================
     internal sealed class GlbWriter
     {
@@ -1567,13 +1567,13 @@ namespace IvanTools
             using (BinaryWriter writer = new BinaryWriter(stream))
             {
                 writer.Write(0x46546C67u);          // "glTF"
-                writer.Write(2u);                   // версия контейнера
+                writer.Write(2u);                   // container version
                 writer.Write((uint)total);
 
                 writer.Write((uint)jsonPadded);
                 writer.Write(0x4E4F534Au);          // "JSON"
                 writer.Write(jsonBytes);
-                for (int i = jsonLength; i < jsonPadded; i++)   // паддинг пробелами
+                for (int i = jsonLength; i < jsonPadded; i++)   // pad with spaces
                     writer.Write((byte)0x20);
 
                 if (binary.Length > 0)
@@ -1581,7 +1581,7 @@ namespace IvanTools
                     writer.Write((uint)binaryPadded);
                     writer.Write(0x004E4942u);      // "BIN\0"
                     writer.Write(binary);
-                    for (int i = binary.Length; i < binaryPadded; i++)   // паддинг нулями
+                    for (int i = binary.Length; i < binaryPadded; i++)   // pad with zeros
                         writer.Write((byte)0);
                 }
 
@@ -1654,7 +1654,7 @@ namespace IvanTools
 
             if (withBounds && count > 0)
             {
-                // POSITION обязан содержать min/max по спецификации glTF
+                // POSITION must contain min/max per the glTF specification
                 fragment.Append(",\"min\":[");
                 fragment.Append(Float(MinComponent(values, components, 0))).Append(',');
                 fragment.Append(Float(MinComponent(values, components, 1))).Append(',');
@@ -1682,7 +1682,7 @@ namespace IvanTools
                     maxIndex = values[i];
             }
 
-            // uint16 вдвое короче uint32; допустимо, пока вершин в примитиве < 65536
+            // uint16 is twice as short as uint32; allowed while a primitive has < 65536 vertices
             bool small = maxIndex < 65536;
             byte[] bytes;
             int componentType;
@@ -1704,7 +1704,7 @@ namespace IvanTools
 
             int offset = (int)_bin.Position;
             _bin.Write(bytes, 0, bytes.Length);
-            // uint16-индексы могут дать длину не кратную 4 -> выравниваем следующий bufferView
+            // uint16 indices may produce a length not divisible by 4 -> align the next bufferView
             PadTo4();
 
             _bufferViews.Add("{\"buffer\":0,\"byteOffset\":" + offset.ToString(CultureInfo.InvariantCulture) +
@@ -1745,7 +1745,7 @@ namespace IvanTools
 
         private string BuildJson()
         {
-            // Нумерация нод: обход дерева от корней (дети всегда после родителя)
+            // Node numbering: traverse the tree from the roots (children always follow their parent)
             List<GlbNode> flat = new List<GlbNode>();
             Dictionary<GlbNode, int> indexByNode = new Dictionary<GlbNode, int>();
             for (int i = 0; i < _scene.Roots.Count; i++)
@@ -1893,7 +1893,7 @@ namespace IvanTools
             }
             json.Append(']');
 
-            // BufferView изображений идут последними (после буферов геометрии)
+            // BufferViews of images come last (after geometry buffers)
             int firstImageBufferView = _bufferViews.Count - _scene.Images.Count;
 
             json.Append(",\"images\":[");
