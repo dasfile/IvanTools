@@ -106,7 +106,8 @@ dist\, obj\        build output (git-ignored)
 * identifiers, UI strings, comments and commit messages are English; sources are
   ASCII, so compiler/HotLoader encoding never corrupts them;
 * sources use LF line endings and UTF-8 without BOM; `.gitattributes` enforces
-  `eol=lf` for every text file;
+  `eol=lf` for every text file, and `.editorconfig` keeps the editor in sync
+  (batch files stay CRLF);
 * no NuGet dependencies: only `RevitAPI`, `RevitAPIUI` and .NET Framework
   assemblies (`System.Windows.Forms`, `System.Drawing`);
 * a new GUID for every new plugin; an existing `AddInId` is **never** changed

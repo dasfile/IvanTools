@@ -1,0 +1,15 @@
+root = true
+
+# Default for all text files: UTF-8 without BOM, LF, final newline
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Windows batch files are the only exception: cmd.exe expects CRLF
+[*.{bat,cmd}]
+end_of_line = crlf
+
+[*.md]
+trim_trailing_whitespace = false
