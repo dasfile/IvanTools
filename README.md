@@ -1,120 +1,131 @@
-# IvanTools - plugins for Autodesk Revit 2023
+# IvanTools for Autodesk Revit
 
-A flat repository: **one `.cs` file per plugin** plus one `<AddIn Type="Command">`
-entry in `IvanTools.addin`. Everything is compiled with `csc.exe` from .NET
-Framework 4.x (**C# 5**, no external DLLs), so each plugin works both as a
-regular add-in and through `IvanTools.HotLoader -> Run Script`.
-
-The tools do **not** create a ribbon tab. Revit lists every command add-in under
-**Add-Ins > External Tools**, so the manifest names are prefixed and all plugin
-classes live in the `IvanTools` namespace - the menu shows a compact, sorted
-`IvanTools.*` group instead of using ribbon space.
+Lightweight C# tools for everyday Autodesk Revit workflows. One manifest, no
+ribbon tab - every command is available in **Add-Ins > External Tools** under
+the `IvanTools.*` group. Built for **Revit 2023** (.NET Framework 4.8, C# 5),
+no NuGet dependencies; other versions may work but are not verified.
 
 ## Tools
 
-| Entry in External Tools | Source | Class | AddInId |
-|---|---|---|---|
-| `IvanTools.AdjustToFace` | `AdjustToFace.cs` | `IvanTools.AdjustToFace` | `aace0286-f1f7-4df6-bdf7-2cfca2a4b4ed` |
-| `IvanTools.ExportToGlb` | `ExportToGlb.cs` | `IvanTools.ExportToGlb` | `8F2A6C41-3D7B-4E62-9A15-6B0C7E4D2F58` |
-| `IvanTools.HotLoader` | `CsHotLoader.cs` | `IvanTools.HotLoader` | `C0A5E7B4-3F21-4C8D-9A62-1D8E5F0B7A31` |
-| `IvanTools.HotLoaderRerun` | `CsHotLoader.cs` | `IvanTools.HotLoaderRerun` | `5E2B9C13-7A44-4D18-B6F0-2C9A8D7E4B51` |
-| `IvanTools.RenumberSheets` | `SheetsBatchRenum.cs` | `IvanTools.RenumberSheets` | `50280453-0000-4e32-88e2-48c4ad6e4e3b` |
-| `IvanTools.RoomCounter` | `RoomCounter.cs` | `IvanTools.RoomCounter` | `7D3C1B2A-4E5F-4A6B-8C9D-0E1F2A3B4C5D` |
-| `IvanTools.SplitWall` | `SplitWall.cs` | `IvanTools.SplitWall` | `A1B2C3D4-E5F6-4321-8765-AABBCCDDEEFF` |
+### Renumber Sheets - `IvanTools.RenumberSheets`
 
-Detailed design notes for individual tools are kept in `<Tool>_PLAN.md`.
+Batch-renumbers sheets selected in the Project Browser.
+
+* prefix, start number and digit padding are configurable;
+* sheets containing "General Data" go first;
+* temporary unique numbers prevent conflicts during renumbering;
+* the Project Browser is refreshed automatically.
+
+### Room Counter - `IvanTools.RoomCounter`
+
+Assigns sequential room numbers by clicking rooms (B101 -> B102 -> B103).
+
+* custom step; prefixes and leading zeros are preserved;
+* processed rooms are highlighted in the active view immediately;
+* rooms only - no other categories.
+
+### Split Wall - `IvanTools.SplitWall`
+
+Splits a multi-layer wall into separate single-layer walls.
+
+* every layer keeps its exact position and thickness;
+* hosted doors, windows and openings are moved to the right layer with their
+  orientation and instance parameters;
+* original wall joins are removed and the new layers are joined back.
+
+### Adjust to Face - `IvanTools.AdjustToFace`
+
+Aligns shape-edited floor or roof vertices to a picked planar face.
+
+* asks whether the top or the bottom of the element should land on the plane;
+* uses the element thickness for the offset;
+* a failed vertex does not cancel the run - a summary is reported instead.
+
+### Export to GLB - `IvanTools.ExportToGlb`
+
+Exports the active 3D view to glTF 2.0 binary (`.glb`).
+
+* PBR materials, textures, transparency, glossiness and metallic;
+* respects section box, hidden elements and phases;
+* geometry is written by a built-in glTF writer - no external libraries.
+
+### Hot Loader - `IvanTools.HotLoader` / `IvanTools.HotLoaderRerun`
+
+A pyRevit-like hot reload for C#: pick a `.cs` file, it is compiled in memory and
+executed without restarting Revit.
+
+* `HotLoaderRerun` repeats the last script without picking a file;
+* a script must contain one public class implementing `IExternalCommand`;
+* the same source file is used by both the add-in build and the hot-reload path.
 
 ## Install
 
-Download the release archive and unpack it into **one** of these folders:
+1. Download the latest release archive.
+2. Unpack it into **one** of these folders:
 
 ```text
 C:\ProgramData\Autodesk\Revit\Addins\2023   (all users)
 %APPDATA%\Autodesk\Revit\Addins\2023        (current user only)
 ```
 
-The archive layout must be preserved:
+3. Start Revit and open **Add-Ins > External Tools** - the tools are listed as
+   `IvanTools.*`.
 
-```text
-IvanTools.addin
-IvanTools\
-    AdjustToFace.dll
-    CsHotLoader.dll
-    ExportToGlb.dll
-    RoomCounter.dll
-    SheetsBatchRenum.dll
-    SplitWall.dll
-```
+The archive contains `IvanTools.addin`, `IvanTools\*.dll`, `README.md` and
+`LICENSE`. A ribbon tab is intentionally not created: External Tools is compact
+and leaves ribbon space free. Do not install the same tool into both folders.
 
-Do not install the same `AddInId` into both locations at once - Revit will report
-a duplicate add-in.
-
-## Build and release
-
-`build.ps1` compiles every plugin and produces a ready-to-publish package:
+## Build from source
 
 ```powershell
-.\build.ps1                        # build 1.0.0
-.\build.ps1 -Version 1.1.0         # another version
-.\build.ps1 -Deploy                # build + copy to ProgramData (close Revit first)
+.\build.ps1                 # build 1.0.0 into dist\
+.\build.ps1 -Version 1.1.0  # build another version
+.\build.ps1 -Deploy         # build and copy to ProgramData (close Revit first)
 ```
 
-Output:
+Requirements: Autodesk Revit 2023 installed (`RevitAPI.dll`, `RevitAPIUI.dll`)
+and .NET Framework 4.x `csc.exe`. The script produces
+`dist\IvanTools-<version>.zip` and prints its SHA256. Expected compiler result:
+0 errors, 0 warnings.
 
-```text
-dist\IvanTools-<version>.zip       release archive
-dist\stage\                        staging folder (same content as the archive)
-build.log                          compiler output of the last build
-```
+## Development loop
 
-The archive contains only binaries and documentation: `IvanTools.addin`,
-`IvanTools\*.dll`, `README.md`, `LICENSE`. Sources are distributed through this
-repository only. Revit API assemblies are referenced at compile time from the
-installed Revit and are never redistributed.
+Edit a plugin `.cs` file and run it through `IvanTools.HotLoader` - no Revit
+restart, no rebuild of the whole package. When the change is ready, rebuild with
+`build.ps1` and publish a new release.
 
-The script requires:
+## Credits
 
-* `C:\Program Files\Autodesk\Revit 2023` (RevitAPI.dll, RevitAPIUI.dll);
-* `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` plus the WPF and
-  WinForms assemblies from the same framework folder.
+Concept, specification and testing: Ivan Rodionov.
+Implementation assistance: Google Gemini, Anthropic Claude.
 
-Expected compiler result: **0 errors, 0 warnings**.
+## Feedback
 
-## Hot reload
-
-`IvanTools.HotLoader` picks a `.cs` file, compiles it in memory and runs it
-without restarting Revit; `IvanTools.HotLoaderRerun` repeats the last script.
-A script must contain exactly one public class implementing `IExternalCommand`
-(the first one found is executed).
-
-## Repository layout
-
-```text
-*.cs               plugin sources (also used by HotLoader)
-IvanTools.addin    single manifest with all command entries
-build.ps1          build / package / deploy script
-LICENSE
-<*>_PLAN.md        design notes per tool
-deprecated\        retired code and assets (git-ignored)
-dist\, obj\        build output (git-ignored)
-```
-
-## Conventions
-
-* one file = one plugin, exactly one public `IExternalCommand` class (HotLoader
-  requirement);
-* identifiers, UI strings, comments and commit messages are English; sources are
-  ASCII, so compiler/HotLoader encoding never corrupts them;
-* sources use LF line endings and UTF-8 without BOM; `.gitattributes` enforces
-  `eol=lf` for every text file, and `.editorconfig` keeps the editor in sync
-  (batch files stay CRLF);
-* no NuGet dependencies: only `RevitAPI`, `RevitAPIUI` and .NET Framework
-  assemblies (`System.Windows.Forms`, `System.Drawing`);
-* a new GUID for every new plugin; an existing `AddInId` is **never** changed
-  between releases, so upgrades replace the tool instead of duplicating it;
-* retired code goes to `deprecated\` (kept on disk, ignored by git; history is
-  still available in git).
+Open an issue in the GitHub Issues section of this repository.
 
 ## License
 
 MIT - see `LICENSE`.
+
+<details>
+<summary>Technical reference</summary>
+
+| Entry in External Tools | Class | AddInId |
+|---|---|---|
+| `IvanTools.AdjustToFace` | `IvanTools.AdjustToFace` | `aace0286-f1f7-4df6-bdf7-2cfca2a4b4ed` |
+| `IvanTools.ExportToGlb` | `IvanTools.ExportToGlb` | `8F2A6C41-3D7B-4E62-9A15-6B0C7E4D2F58` |
+| `IvanTools.HotLoader` | `IvanTools.HotLoader` | `C0A5E7B4-3F21-4C8D-9A62-1D8E5F0B7A31` |
+| `IvanTools.HotLoaderRerun` | `IvanTools.HotLoaderRerun` | `5E2B9C13-7A44-4D18-B6F0-2C9A8D7E4B51` |
+| `IvanTools.RenumberSheets` | `IvanTools.RenumberSheets` | `50280453-0000-4e32-88e2-48c4ad6e4e3b` |
+| `IvanTools.RoomCounter` | `IvanTools.RoomCounter` | `7D3C1B2A-4E5F-4A6B-8C9D-0E1F2A3B4C5D` |
+| `IvanTools.SplitWall` | `IvanTools.SplitWall` | `A1B2C3D4-E5F6-4321-8765-AABBCCDDEEFF` |
+
+Conventions:
+
+* one `.cs` file = one plugin with exactly one public `IExternalCommand` class;
+* sources are ASCII, UTF-8 without BOM, LF (`.gitattributes`, `.editorconfig`);
+* retired code and assets live in `deprecated/` and are git-ignored;
+* `AddInId` never changes between releases, so upgrades replace tools instead of
+  duplicating them.
+
+</details>
