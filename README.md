@@ -68,6 +68,10 @@ C:\ProgramData\Autodesk\Revit\Addins\2023   (all users)
 %APPDATA%\Autodesk\Revit\Addins\2023        (current user only)
 ```
 
+Unpack the **contents**, not the wrapper folder: `IvanTools.addin` and the
+`IvanTools` folder must sit directly inside the `2023` folder, otherwise Revit
+will not find the manifest.
+
 3. Start Revit and open **Add-Ins > External Tools** - the tools are listed as
    `IvanTools.*`.
 
